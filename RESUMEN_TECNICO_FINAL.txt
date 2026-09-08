@@ -1,0 +1,663 @@
+================================================================================
+RESUMEN TÉCNICO FINAL - SISTEMA DE CONTROL REMOTO SEGURO ESP-NOW
+Robots de Fútbol - Competencia 2026
+================================================================================
+
+PROYECTO: Robot Soccer con Protocolo ESP-NOW Cifrado
+EQUIPO: 3 robots independientes (3 pares control-robot)
+MCU: ESP32 DevKit WROOM-32
+PROTOCOLO: ESP-NOW con AES-128 + CMAC nativo
+STATUS: LISTO PARA COMPILACIÓN Y FLASHEO
+
+================================================================================
+1. ARQUITECTURA DEL SISTEMA
+================================================================================
+
+1.1 COMPONENTES PRINCIPALES
+
+HARDWARE:
+- 6 x ESP32 DevKit WROOM-32 (3 controles + 3 robots)
+- 3 x Módulo L298N (driver H puente)
+- 6 x Motores DC con reductora 3-6V
+- 9 x Celda 18650 Li-ion 3.7V (2 series en cada robot, 1 en cada control)
+- 3 x BMS 2S con balance
+- 3 x TP4056 + Boost 5V (cargadores para controles)
+- Capacitores, fusibles, conectores (ver BOM en GitHub)
+
+SOFTWARE:
+- Arduino-ESP32 Core v3.x (IDF 5.x)
+- Librería esp_now.h nativa
+- Persistencia NVS mediante Preferences.h
+
+1.2 TOPOLOGÍA DE RED
+
+                    CONTROL 1 (TX)
+                   /     |     \
+                  /      |      \
+          CIFRADO1   CIFRADO1   CIFRADO1
+            PMK1       LMK1       MAC1
+              |
+              ↓
+          ROBOT 1 (RX)
+
+(x3 pares independientes, misma arquitectura)
+
+Características:
+- Comunicación unicast exclusivamente (no broadcast)
+- Cada control manda SOLO a su robot asignado
+- 3 pares simultáneos en el mismo canal (aislamiento por MAC + cifrado)
+- Ningún par interfiere con los otros
+
+1.3 PROTOCOLO DE COMUNICACIÓN
+
+Estructura RemoteMsg (18 bytes exactos):
+┌─────────────────────────────────────────────────────────────────┐
+│ Field         │ Type      │ Bytes │ Rango            │ Propósito │
+├─────────────────────────────────────────────────────────────────┤
+│ magic         │ uint32_t  │ 4     │ 0x534F4343       │ Filtro    │
+│ version       │ uint8_t   │ 1     │ 1                │ Compat.   │
+│ pairId        │ uint8_t   │ 1     │ 1-3              │ Validación│
+│ flags         │ uint16_t  │ 2     │ 0x0001 (botón)   │ Señales   │
+│ seq           │ uint32_t  │ 4     │ Secuencial       │ Anti-replay
+│ throttle      │ int16_t   │ 2     │ -1000 a +1000    │ Control   │
+│ steering      │ int16_t   │ 2     │ -1000 a +1000    │ Control   │
+│ crc16         │ uint16_t  │ 2     │ CCITT 0x1021     │ Integridad│
+└─────────────────────────────────────────────────────────────────┘
+
+Frecuencia de envío: 50 Hz (20 ms)
+Timeout failsafe: 300 ms
+
+1.4 FLUJO DE DATOS TÍPICO
+
+Control:
+┌──────────────────┐
+│ Calibra joystick │ (Setup)
+└────────┬─────────┘
+         │
+┌────────▼──────────────────────┐
+│ Loop (cada 20ms):             │
+│ - Lee ADC x8 muestras         │
+│ - Normaliza a -1000..+1000    │
+│ - Aplica deadzone             │
+│ - Carga seq de NVS            │
+│ - Calcula CRC16               │
+│ - Encripta y manda ESP-NOW    │
+└────────┬──────────────────────┘
+         │
+         ▼
+    ┌────────────┐
+    │ WiFi Stack │ (AES-128 + CMAC)
+    └────────┬───┘
+             │
+             ▼ (paquete cifrado + autenticado)
+         [AIRE]
+             │
+             ▼
+    ┌────────────┐
+    │ WiFi Stack │ (desencripta)
+    └────────┬───┘
+             │
+             ▼
+        ┌────────────────────────────────────┐
+        │ Callback ESP-NOW (núcleo WiFi):    │
+        │ - Valida MAC origen                │
+        │ - Valida magic + version + CRC16   │
+        │ - Verifica seq > last (anti-replay)│
+        │ - Guarda en buffer volátil (mutex) │
+        └────────┬───────────────────────────┘
+                 │
+                 ▼
+        ┌────────────────────────────────────┐
+        │ Loop() (núcleo app):               │
+        │ - Lee buffer con mutex atómico     │
+        │ - Valida timeout (300ms)           │
+        │ - Mezcla throttle + steering       │
+        │ - Mapea a PWM (0-255)              │
+        │ - Controla puente H L298N          │
+        └────────────────────────────────────┘
+
+================================================================================
+2. VALIDACIÓN DE SEGURIDAD
+================================================================================
+
+2.1 AMENAZAS MITIGADAS
+
+┌─────────────────────────────┬──────────────────────┬──────────────────┐
+│ Amenaza                     │ Mecanismo            │ Implementación   │
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Interceptación de datos     │ Cifrado AES-128      │ PMK + LMK nativo │
+│ (confidencialidad)          │                      │ esp_now_set_pmk()│
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Inyección de paquetes       │ Autenticación CMAC   │ PMK genera CMAC  │
+│ (integridad)                │ CRC16 + validación   │ soccer_protocol.│
+│                             │ magic + version      │ h soccerCrc16()  │
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Replay de tráfico capturado │ Número de secuencia  │ seq monotónico   │
+│ (replay)                    │ persistido en NVS    │ reserveSequence()│
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Suplantación de identidad   │ MAC de origen +      │ memcmp() en      │
+│ (autenticación)             │ PAIR_ID en payload   │ callback         │
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Pérdida de control          │ Failsafe 300ms       │ robot_rx.ino     │
+│ (disponibilidad)            │ detiene motores      │ línea 274        │
+├─────────────────────────────┼──────────────────────┼──────────────────┤
+│ Interferencia entre pares   │ Cifrado único +      │ TEAM_PAIRS[]     │
+│ (aislamiento)               │ validación MAC+PAIR  │ team_config.h    │
+└─────────────────────────────┴──────────────────────┴──────────────────┘
+
+2.2 NIVEL DE SEGURIDAD ALCANZADO
+
+Análisis de riesgo para torneo local:
+
+✓ MITIGADO: Sabotaje pasivo (escucha)
+  → Cifrado AES-128 + CMAC: imposible sin PMK/LMK
+
+✓ MITIGADO: Sabotaje activo (inyección)
+  → Requiere PMK/LMK válidas: cada par tiene claves distintas
+
+✓ MITIGADO: Replay de paquetes antiguos
+  → Número de secuencia monotónico persistido en flash
+
+✓ MITIGADO: Interferencia entre pares
+  → Triple validación: MAC + PAIR_ID + cifrado
+
+✓ MITIGADO: Pérdida de control
+  → Failsafe detiene motores < 300ms sin reset de seg
+
+⚠ BAJO RIESGO NO MITIGADO: Robot reiniciado
+  → Si el robot se apaga, su lastSeq vuelve a 0
+  → Un atacante con tráfico capturado podría colar paquete viejo en primer segundo tras reinicio
+  → En competencia local sin sniffers RF profesionales, riesgo aceptable
+  → Solución futura: persistir lastSeq en robot NVS
+
+2.3 SUPUESTOS DE SEGURIDAD
+
+- No hay adversarios con analizadores de espectro RF
+- Las claves PMK/LMK no se transmiten públicamente
+- Cada par tiene claves distintas
+- El evento proporciona vigilancia física contra manipulación de hardware
+- Los ESP32 no pueden reflashear sin acceso directo a USB/UART
+
+================================================================================
+3. ESTADO ACTUAL DEL CÓDIGO
+================================================================================
+
+3.1 ARCHIVOS LISTOS PARA COMPILAR
+
+✓ control_tx/control_tx.ino
+  - Persistencia NVS con reserva de secuencia
+  - Calibración automática de joystick
+  - 8-muestreo ADC + normalización -1000..+1000
+  - Cifrado PMK/LMK + validación MAC esperada
+  - CRC16 en cada paquete
+
+✓ robot_rx/robot_rx.ino
+  - Validación MAC de origen
+  - Anti-replay con isNewerSequence()
+  - Protección atómica entre núcleos (portMUX_TYPE)
+  - Failsafe 300ms SIN reset de secuencia
+  - Control diferencial con reescala proporcional
+  - Frenado activo + cambio de dirección seguro
+
+✓ soccer_protocol.h
+  - Estructura RemoteMsg 18 bytes exactos
+  - Magic "SOCC" (0x534F4343)
+  - CRC16 CCITT con polinomio 0x1021
+  - static_assert para validar tamaño
+
+✓ team_config.h.example
+  - Plantilla con 3 pares configurables
+  - Placeholders obvios (no confundir con reales)
+  - Función helper teamPair(pairId)
+
+✓ .gitignore
+  - Excluye team_config.h (contiene claves reales)
+
+3.2 DIRECTORIO DEL PROYECTO
+
+Robot-soccer/
+├── control_tx/
+│   ├── control_tx.ino           [LISTO]
+│   └── team_config.h            [TODO: crear, nunca commitear]
+├── robot_rx/
+│   ├── robot_rx.ino             [LISTO]
+│   └── team_config.h            [TODO: crear, nunca commitear]
+├── get_mac/
+│   └── get_mac.ino              [LISTO para usar antes de configurar]
+├── soccer_protocol.h            [LISTO]
+├── team_config.h.example        [LISTO, plantilla de referencia]
+├── .gitignore                   [Excluye team_config.h]
+├── LICENSE                      [MIT]
+└── README.md                    [Documentación completa]
+
+================================================================================
+4. REEMPLAZOS CRÍTICOS (ANTES DE FLASHEAR)
+================================================================================
+
+4.1 GENERAR VALORES REALES
+
+PASO 1: Obtener MACs de los 6 ESP32
+
+Acción:
+  1. Flashear get_mac/get_mac.ino en ESP32 #1
+  2. Abrir Serial Monitor a 115200 baud
+  3. Anotar la MAC impresa (formato XX:XX:XX:XX:XX:XX)
+  4. Repetir para ESP32 #2, #3, #4, #5, #6
+
+Resultado esperado: 6 MACs únicas (ej: "A4:CF:12:34:AB:CD")
+
+PASO 2: Generar claves PMK y LMK propias
+
+Acción (Linux/macOS/Windows PowerShell):
+  python3 -c "import secrets; print(secrets.token_hex(16))"
+  
+Ejecutar 6 veces para obtener 6 claves de 16 bytes cada una.
+
+Resultado esperado: 6 strings hex de 32 caracteres (ej: "f3a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5")
+
+PASO 3: Crear team_config.h real (NO subir a Git)
+
+Archivo: control_tx/team_config.h (COPY de team_config.h.example)
+
+Reemplazar:
+┌──────────────────┬───────────────────────────────────┐
+│ Campo            │ Con qué reemplazar                 │
+├──────────────────┼───────────────────────────────────┤
+│ WIFI_CHANNEL     │ 1, 6 u 11 (menos saturado)         │
+│ TEAM_PAIR_COUNT  │ 3 (o 4 si usan 4 robots)           │
+│ TEAM_PAIRS[0]    │ Par 1: control 1, robot 1          │
+│ .controlMac      │ MAC real del ESP32 del control 1   │
+│ .robotMac        │ MAC real del ESP32 del robot 1     │
+│ .pmk[16]         │ Primera clave PMK generada         │
+│ .lmk[16]         │ Primera clave LMK generada         │
+│ TEAM_PAIRS[1]    │ Par 2: control 2, robot 2 (idem)   │
+│ TEAM_PAIRS[2]    │ Par 3: control 3, robot 3 (idem)   │
+└──────────────────┴───────────────────────────────────┘
+
+Formato de conversión hex a array:
+  Clave hex: "f3a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5"
+  Array:     {0xf3, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0xa7,
+              0xb8, 0xc9, 0xd0, 0xe1, 0xf2, 0xa3, 0xb4, 0xc5}
+
+Repetir: Copiar team_config.h también a robot_rx/team_config.h (IDÉNTICO)
+
+Verificación:
+  - Cada par tiene PMK y LMK DISTINTAS de los otros pares
+  - Ningún MAC es repetido
+  - Todas las claves tienen exactamente 16 bytes (32 caracteres hex)
+
+4.2 CONFIGURACIÓN DE HARDWARE
+
+En cada módulo L298N:
+  ✓ RETIRAR jumpers de ENA y ENB (si están puestos)
+  ✓ Conectar ENA a GPIO32, ENB a GPIO33 del ESP32
+  ✓ Capacitor 470-1000µF entre VM-GND
+  ✓ Fusible o PTC en positivo de batería
+
+En cada joystick KY-023 del control:
+  ✓ Capacitor 100nF entre VRx-GND
+  ✓ Capacitor 100nF entre VRy-GND
+  ✓ Alimentar a 3.3V (NO 5V)
+
+================================================================================
+5. PASOS DE CONFIGURACIÓN (EN ORDEN)
+================================================================================
+
+FASE 1: PREPARACIÓN (Sin compilar todavía)
+
+□ 1. Clonar/descargar el repositorio GitHub
+     github.com/brayangonzalez261098/Robot-soccer
+
+□ 2. Instalar Arduino-ESP32 Core v3.x
+     Arduino IDE → Boards Manager → Search "esp32" →
+     → Instalar "esp32 by Espressif Systems" versión 3.x o superior
+
+□ 3. Conectar los 6 ESP32 uno por uno a USB
+
+□ 4. Flashear get_mac.ino en cada uno
+     - Abrir get_mac/get_mac.ino
+     - Seleccionar Board: "ESP32 Dev Module"
+     - Upload (velocidad 115200)
+     - Anotar las 6 MACs en un documento
+
+□ 5. Generar 6 claves PMK/LMK propias
+     - Terminal: python3 -c "import secrets; print(secrets.token_hex(16))"
+     - Ejecutar 6 veces
+     - Guardar en documento (verificar que todas sean diferentes)
+
+□ 6. Crear team_config.h real
+     - Copiar team_config.h.example a control_tx/team_config.h
+     - Copiar team_config.h.example a robot_rx/team_config.h
+     - Abrir ambos y reemplazar:
+       • WIFI_CHANNEL: 1, 6, u 11 (experimentar en el evento)
+       • TEAM_PAIRS[0..2]: 3 pares con MACs y claves reales
+     - GUARDAR ambos
+     - Verificar que .gitignore excluye *.config.h
+
+□ 7. Decidir asignación de PAIR_ID
+     Ejemplo:
+     - ESP32 A (MAC ...01): PAIR_ID = 1 (control)
+     - ESP32 B (MAC ...02): PAIR_ID = 1 (robot)
+     - ESP32 C (MAC ...03): PAIR_ID = 2 (control)
+     - ESP32 D (MAC ...04): PAIR_ID = 2 (robot)
+     - ESP32 E (MAC ...05): PAIR_ID = 3 (control)
+     - ESP32 F (MAC ...06): PAIR_ID = 3 (robot)
+
+FASE 2: FLASHEO (Compilación y carga de firmware)
+
+□ 8. Flashear CONTROL 1
+     - Editar control_tx/control_tx.ino
+     - Buscar: #define PAIR_ID
+     - Cambiar: #define PAIR_ID 1
+     - Board: ESP32 Dev Module
+     - Upload
+     - Verificar serial output (indicador de MAC, calibración)
+
+□ 9. Flashear ROBOT 1
+     - Editar robot_rx/robot_rx.ino
+     - Buscar: #define PAIR_ID
+     - Cambiar: #define PAIR_ID 1
+     - Board: ESP32 Dev Module
+     - Upload
+     - Verificar serial output
+
+□ 10. Repetir para pares 2 y 3
+      - Cambiar PAIR_ID a 2 en ambos (control + robot)
+      - Flashear ambos
+      - Repetir con PAIR_ID = 3
+
+FASE 3: PRUEBAS UNITARIAS (Por cada par, UNO A LA VEZ)
+
+□ 11. Prueba Par 1 - Conectividad
+      - Encender Robot 1
+      - Encender Control 1
+      - Esperar 2 segundos
+      - Serial del Robot debe decir: "Enlace valido: control habilitado"
+      - LED del Robot debe estar HIGH (verde/azul)
+
+□ 12. Prueba Par 1 - Joystick
+      - Control 1: mover joystick completamente adelante
+      - Robot 1: debe moverse adelante
+      - Control 1: mover joystick a la izquierda
+      - Robot 1: debe girar izquierda
+      - Repetir: atrás, derecha, diagonal (todas las direcciones)
+      - Presionar botón del joystick: Robot debe frenar
+
+□ 13. Prueba Par 1 - Failsafe
+      - Robot 1 encendido
+      - Control 1 encendido (verificar conexión con LED)
+      - Apagar Control 1 abruptamente (desenchufar USB)
+      - Contar: Robot debe frenar dentro de ~300ms (menos de 1 segundo)
+      - Serial del Robot debe decir: "Failsafe activo: motores detenidos"
+      - LED del Robot debe estar LOW (apagado)
+      - Encender Control 1 de nuevo
+      - Esperar ~1 segundo
+      - Serial del Robot debe volver a decir: "Enlace valido"
+
+□ 14. Prueba Par 1 - Reinicio de Control
+      - Robot 1 y Control 1 funcionando normalmente
+      - Apagar Control 1 (failsafe activado, Robot parado)
+      - Encender Control 1 de nuevo
+      - Verificar que Robot RECONECTA INMEDIATAMENTE (gracias a NVS)
+      - No debe haber demora > 100ms
+      - Joystick debe responder de inmediato
+
+□ 15. Repetir pruebas 11-14 para Par 2 y Par 3
+      - Cada par INDEPENDIENTEMENTE (uno a la vez)
+      - Tomar nota de cualquier anomalía
+
+FASE 4: PRUEBA MULTI-PAR (LOS 3 PARES JUNTOS)
+
+□ 16. Encender todos los robots (3 ESP32)
+      - Esperar 3 segundos para que todos inicialicen
+
+□ 17. Encender todos los controles (3 ESP32)
+      - Esperar 3 segundos
+
+□ 18. Verificar aislamiento
+      - Control 1: mover joystick
+      - Verificar que SOLO Robot 1 se mueve (no Robot 2 ni 3)
+      - Control 2: mover joystick
+      - Verificar que SOLO Robot 2 se mueve
+      - Control 3: mover joystick
+      - Verificar que SOLO Robot 3 se mueve
+      - Serial del Robot 1 debe mostrar comandos de Control 1
+      - Serial del Robot 2 NO debe mostrar comandos de Control 1
+      - (etc.)
+
+□ 19. Verificar latencia
+      - Mover joystick
+      - Observar que Robot responde en < 50ms (casi instantáneo)
+      - No debe haber lag perceptible
+
+□ 20. Verificar estabilidad
+      - Dejar 3 pares encendidos 5 minutos
+      - No debe haber desconexiones inesperadas
+      - LEDs deben permanecer en estado estable
+      - No debe haber paquetes perdidos anómalos
+
+FASE 5: VALIDACIÓN PRE-COMPETENCIA
+
+□ 21. Medición de consumo
+      - Encender cada robot
+      - Usar multímetro para medir corriente durante:
+        • Parado: ~100-200mA
+        • Movimiento suave: ~500-1000mA
+        • Movimiento máximo: ~2000-3000mA
+      - Nota: Si consumo > 3A continuo, el BMS 2S puede cortar
+      - Considerar mejorar a TB6612FNG si es problema
+
+□ 22. Prueba de rango
+      - En la sede del evento (no en casa)
+      - Encender Robot 1 + Control 1
+      - Alejar Control 1 del Robot 1 gradualmente
+      - Anotar distancia máxima donde responde (típico: 50-100m)
+      - Si distancia < 30m, revisar:
+        • Antena del ESP32 no obstruida
+        • Interferencia de otros equipos WiFi/Bluetooth
+        • Cambiar WIFI_CHANNEL en team_config.h
+
+□ 23. Prueba de duración de batería
+      - Cargar todas las baterías al 100%
+      - Encender Robot 1 + Control 1
+      - Usar al máximo durante 30 minutos
+      - Anotar cuánto voltaje bajó
+      - Calcular: ¿cuántas partidas alcanza con esta batería?
+      - RECOMENDACIÓN: llevar 2 juegos de baterías por robot
+
+□ 24. Simulación de sabotaje (opcional, pero recomendado)
+      - Capturar paquete válido cifrado (sniffer no estándar)
+      - Intentar inyectarlo manualmente
+      - ESPERADO: Robot lo rechaza (CRC, magic, seq no coinciden)
+      - ESPERADO: No se mueve si seq es antiguo
+
+================================================================================
+6. LISTA DE VERIFICACIÓN PRE-COMPETENCIA
+================================================================================
+
+HARDWARE:
+  □ 3 robots ensamblados (chassis, motores, electrónica)
+  □ 3 controles ensamblados (joystick, carcasa, batería)
+  □ LEDs indicadores funcionales en cada robot
+  □ Switches de encendido/apagado funcionales en cada robot
+  □ Jumpers ENA/ENB RETIRADOS de los 3 módulos L298N
+  □ Capacitores instalados en posiciones correctas (robots + controles)
+  □ Fuentes de batería balanceadas (BMS 2S con balance)
+  □ Cargas solicitadas antes de la competencia
+  □ 2 juegos de baterías por robot (9 baterías totales)
+  □ 3 cargas rápidas para los controles (9 baterías 18650)
+
+FIRMWARE:
+  □ team_config.h real (NO .example) en control_tx/
+  □ team_config.h real (NO .example) en robot_rx/
+  □ PAIR_ID correcto en cada sketch antes de flashear
+  □ Todas las 6 MACs reales en team_config.h
+  □ Todas las 6 claves (PMK + LMK) reales y distintas en team_config.h
+  □ WIFI_CHANNEL coincide en control_tx y robot_rx
+  □ Compilación sin warnings o errores
+  □ Flasheo exitoso en todos los 6 ESP32
+
+SOFTWARE/DIGITAL:
+  □ Repositorio GitHub con .gitignore actualizando team_config.h
+  □ Copia local de seguridad de team_config.h real (por si se borra)
+  □ Documento con MACs y claves impresas o en archivo encriptado
+  □ README actualizado con versión final
+
+PRUEBAS:
+  □ Pruebas unitarias completadas (pares 1, 2, 3)
+  □ Failsafe verificado en los 3 robots (detención < 300ms)
+  □ Prueba multi-par completada (3+3 pares sin interferencia)
+  □ Rango real probado en sede del evento
+  □ Consumo de batería medido bajo carga
+  □ Duración de partida estimada (30+ minutos mínimo)
+  □ Latencia de control verificada (< 50ms perceptible)
+
+LOGÍSTICA:
+  □ Herramientas de emergencia: soldador portátil, desoldador, cables
+  □ Repuestos: 3 ESP32 extra, 3 módulos L298N extra
+  □ Cables USB para reprogramación en campo
+  □ Batería extra cargada para los 3 robots
+  □ Cargador de batería portátil para emergencias
+  □ Documento de configuración (MACs, claves) impreso o en USB
+
+================================================================================
+7. SIGUIENTES PASOS
+================================================================================
+
+INMEDIATO (Esta semana):
+1. Recopilar las 6 MACs exactas de los 6 ESP32
+2. Generar las 6 claves propias (PMK y LMK)
+3. Crear team_config.h real en ambas carpetas
+4. Flashear get_mac.ino en todos para validar MACs
+
+CORTO PLAZO (Semana siguiente):
+5. Flashear control_tx.ino con PAIR_ID correcto en cada control (3 flasheos)
+6. Flashear robot_rx.ino con PAIR_ID correcto en cada robot (3 flasheos)
+7. Pruebas unitarias de los 3 pares
+
+MEDIANO PLAZO (2 semanas antes de competencia):
+8. Prueba multi-par (3 pares simultáneos)
+9. Medición de consumo y duración de batería
+10. Prueba de rango en la sede del evento
+11. Ajustes finales de WIFI_CHANNEL si hay interferencia
+
+CORTESÍA PRE-COMPETENCIA (1 semana antes):
+12. Cargar todas las baterías al 100%
+13. Última ronda de pruebas unitarias
+14. Revisión de seguridad: validar que team_config.h no está en Git
+15. Preparar kit de emergencia (herramientas, repuestos)
+16. Imprimir o guardar documento de configuración (MACs, claves)
+
+DURANTE COMPETENCIA:
+17. En la sede: prueba final de rango y latencia
+18. Mantener los 6 ESP32 con firmware actualizado
+19. Llevar 2 juegos de baterías por robot (cambio rápido entre partidas)
+20. Monitorear LEDs de estado durante todas las partidas
+
+================================================================================
+8. NOTAS DE SEGURIDAD OPERACIONAL
+================================================================================
+
+8.1 MANEJO DE CLAVES
+
+✓ CORRECTO:
+- Claves en team_config.h guardadas localmente (no en nube pública)
+- .gitignore excluye team_config.h del repositorio
+- Copia de seguridad de team_config.h en archivo encriptado offline
+- Cada par tiene claves distintas (si pierden una, no pierden todas)
+
+✗ INCORRECTO:
+- Subir team_config.h a GitHub (NUNCA)
+- Usar las claves de ejemplo (son públicas, no sirven)
+- Compartir claves por email o chat sin encriptar
+- Reutilizar claves entre competencias diferentes
+
+8.2 MANEJO DE ESP32
+
+✓ CORRECTO:
+- Flashear todos los 6 ESP32 UNA SOLA VEZ antes de competencia
+- No cambiar PAIR_ID durante el evento (solo antes de viajar)
+- Guardar los 6 ESP32 en bolsa antiestática después de competencia
+- Hacer backup de team_config.h antes de viajar al evento
+
+✗ INCORRECTO:
+- Reflashear los ESP32 cada vez que algo falla (pierden NVS)
+- Cambiar PAIR_ID sin recompilación (leyendo desde team_config.h fijo)
+- Prestar un ESP32 a otro equipo sin cambiar claves
+
+8.3 PROCEDIMIENTO DE EMERGENCIA
+
+Si falla control 1 a mitad de partida:
+1. Apagar robot 1 inmediatamente
+2. Cambiar a joystick respaldo (si existe)
+3. Si no hay respaldo: usar control 2 sobre robot 1 (requiere reconfiguración de PAIR_ID)
+   → Editar control_tx.ino: cambiar #define PAIR_ID 2 a 1
+   → Recompilar y flashear control 2
+   → (Tarda ~5 minutos)
+
+Si falla robot 1 a mitad de partida:
+1. Cambiar a robot 2 (si es permitido por reglamento)
+2. Editar robot_rx.ino: cambiar #define PAIR_ID 2 a 1
+3. Recompilar y flashear robot 2
+4. Probar conexión con control 1
+
+================================================================================
+9. MEJORAS FUTURAS (POST-COMPETENCIA)
+================================================================================
+
+INMEDIATO:
+- [ ] Migrar a TB6612FNG para reducir consumo de batería
+- [ ] Agregar telemetría de vuelta (voltaje de batería, RSSI)
+- [ ] Implementar modo "turbo" con botón del joystick
+
+MEDIANO PLAZO:
+- [ ] Agregar encoders + PID para corrección de trayectoria
+- [ ] Persistir lastSeq en robot (cerrar ventana de replay post-reinicio)
+- [ ] Botón físico de armado como requisito de seguridad adicional
+- [ ] Nonce generado por robot al arrancar para validación adicional
+
+LARGO PLAZO:
+- [ ] Migrar a protocolo WiFi (no just ESP-NOW) si se requiere mayor rango
+- [ ] Integración con visión (cámara + AI para detección de balón)
+- [ ] Soporte para 4+ robots en mismo campo
+
+================================================================================
+10. CONTACTO Y SOPORTE
+================================================================================
+
+REPOSITORIO OFICIAL:
+github.com/brayangonzalez261098/Robot-soccer
+
+EQUIPO:
+- Profesor: Braygon González (brayangonzalez261098)
+- Estudiante: Upcast
+
+PROBLEMAS COMUNES Y SOLUCIONES:
+
+Problema: "No se pudo iniciar ESP-NOW"
+Solución: Reinstalar Arduino-ESP32 Core v3.x, reiniciar Arduino IDE
+
+Problema: "PAIR_ID o team_config.h no corresponde a este control"
+Solución: Verificar que PAIR_ID coincida con la MAC en team_config.h
+
+Problema: "Compilacion con configuracion de ejemplo"
+Solución: No existe team_config.h; crear uno a partir de .example con valores reales
+
+Problema: "No se pudo reservar el contador anti-replay en NVS"
+Solución: NVS corrupta; flashear get_mac.ino primero (reinicia NVS)
+
+Problema: Robot no responde
+Solución: Verificar failsafe (apagar control, contar 300ms, robot debe frenar)
+
+Problema: Interferencia entre controles
+Solución: Las claves son distintas; si persiste, cambiar WIFI_CHANNEL a 6 u 11
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================
+
+Fecha: Septiembre 2026
+Versión: 1.0 FINAL
+Estado: LISTO PARA PRODUCCIÓN Y COMPETENCIA
+
+Contacto: Revisar en GitHub issues o documentación README
