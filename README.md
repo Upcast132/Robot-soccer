@@ -57,35 +57,30 @@ ESP32 DEVKIT             DRIVER L298N               MOTORES
 +----------------+       +------------------+       +-----------+
 | GPIO25 (IN1)   |-------| IN1              |       |           |
 | GPIO26 (IN2)   |-------| IN2              |       | MOTOR IZQ |
-| GPIO32 (ENA)   |-------| ENA (SIN JUMPER!)|-------| (2 en     |
-|                |       |                  |       |  paralelo)|
+| GPIO32 (ENA)   |-------| ENA (SIN JUMPER!)|-------| (1 motor) |
 | GPIO27 (IN3)   |-------| IN3              |       |           |
 | GPIO14 (IN4)   |-------| IN4              |       | MOTOR DER |
-| GPIO33 (ENB)   |-------| ENB (SIN JUMPER!)|-------| (2 en     |
-|                |       |                  |       |  paralelo)|
+| GPIO33 (ENB)   |-------| ENB (SIN JUMPER!)|-------| (1 motor) |
 | GND            |---+---| GND              |       +-----------+
 +----------------+   |   +--------+---------+
                      |            |
-BATERIA 2S LiPo      |            |
-7.4V + --------------+------------| 12V / VM
-7.4V - ---------------------------| GND
-                     |            |
-CAPACITOR            |            |
-470-1000uF           |            |
-(+ a VM, - a GND) ---+            |
-                     |            |
-REGULADOR/BUCK       |            |
-5V OUT --------------|------------| 5V (si L298N lo provee)
-GND -----------------+------------| GND
-                     |            |
-ESP32 VIN <----------+            |
-ESP32 GND <----------+            |
+BATERIA 2S 18650 (BMS con balance)
+BAT+ ------------------------------| 12V / VM
+BAT- -----------------------+------| GND
+                            |
+CAPACITOR 470-1000uF         |      BUCK 5V DEDICADO
+(+) a VM, (-) a GND          +------| IN-
+BAT+ -------------------------------| IN+
+                                   | OUT+ |------ ESP32 VIN
+                                   | OUT- |------ ESP32 GND
 ```
 
 Advertencias criticas del robot:
 - RETIRAR JUMPERS DE ENA Y ENB: Si los jumpers estan puestos, los pines quedan fijos en HIGH y el PWM del ESP32 no tendra efecto. La velocidad sera siempre maxima o nula.
 - Tierra comun: GND de bateria, driver y ESP32 deben estar conectados entre si.
-- No alimentar motores desde el pin 3.3V o 5V del ESP32. Usar regulador dedicado o salida 5V del L298N solo si la corriente es suficiente.
+- No alimentar motores desde el pin 3.3V o 5V del ESP32.
+- Alimentar el ESP32 con un buck dedicado de 5V. No usar la salida 5V del L298N con este paquete 2S.
+- El paquete 2S requiere dos celdas 18650 iguales, BMS 2S con balance y cargador 8.4V para 2S. No cargarlo con TP4056.
 - Capacitor electrolitico de 470-1000uF entre VM y GND es obligatorio para absorber picos de corriente y evitar resets del ESP32.
 - Fusible o PTC en positivo de bateria recomendado para proteccion contra cortocircuitos.
 
@@ -97,9 +92,10 @@ Advertencias criticas del robot:
 | :--- | :--- | :--- | :--- |
 | ESP32 DevKit | 1 | 3 | WROOM-32 o similar |
 | Driver L298N | 1 | 3 | O TB6612FNG como mejora futura |
-| Motor DC con reductora | 2 | 6 | 3-6V, eje D. Se conectan 2 en paralelo por canal |
-| Celda LiPo 3.7V 2000mAh | 2 | 6 | Configuracion serie 2S = 7.4V |
+| Motor DC con reductora | 2 | 6 | 3-6V, eje D. Un motor por canal del L298N |
+| Celda 18650 3.7V nominal / 4.2V cargada | 2 | 6 | Celdas iguales en serie: 2S = 7.4V nominal, 8.4V maximo |
 | BMS 2S 7.4V con balance | 1 | 3 | Proteccion sobre-descarga y balance de celdas |
+| Convertidor buck 5V | 1 | 3 | Alimentacion dedicada para VIN del ESP32 |
 | Capacitor electrolitico | 1 | 3 | 470uF a 1000uF, 16V+. Entre VM-GND del driver |
 | Capacitor ceramico | 1 | 3 | 100nF. Cerca de VCC del ESP32 |
 | Fusible o PTC | 1 | 3 | En positivo de bateria. Valor segun stall current |
@@ -138,6 +134,7 @@ Advertencias criticas del robot:
 
 ```text
 esp-now-soccer-bots/
+├── soccer_protocol.h       # Formato de paquete y CRC compartidos
 ├── control_tx/
 │   ├── control_tx.ino       # Firmware transmisor con persistencia NVS
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
@@ -175,6 +172,8 @@ Copiar `team_config.h.example` a `team_config.h` dentro de las carpetas `control
 - Las 6 claves generadas en paso 2.
 - Canal WiFi deseado (default: 1). Canales recomendados si hay interferencia: 1, 6 u 11.
 
+Las copias contienen secretos y estan excluidas por `.gitignore`. La plantilla versionada usa MAC y claves publicas de ejemplo; no proporcionan seguridad.
+
 ### Paso 4: Asignar PAIR_ID
 
 En cada sketch, definir el identificador de par antes de compilar:
@@ -202,8 +201,10 @@ Para cada par, individualmente:
 1. Encender robot.
 2. Encender control.
 3. Mover joystick en todas direcciones. Verificar respuesta correcta.
-4. Apagar control abruptamente. Verificar que robot detiene motores en menos de 300ms.
-5. Reiniciar control. Verificar que robot acepta comandos inmediatamente (gracias a persistencia NVS).
+4. Presionar el boton del joystick y verificar que actua como parada mientras se mantiene pulsado.
+5. Apagar control abruptamente. Verificar que el L298N entra en frenado en menos de 300ms.
+6. Reiniciar control. Verificar que robot acepta comandos inmediatamente (gracias a persistencia NVS).
+7. Medir voltaje y corriente de cada motor bajo carga antes de aumentar `MOTOR_MAX_DUTY`.
 
 ### Paso 7: Prueba multi-par
 
@@ -218,12 +219,12 @@ Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. 
 | Parametro | Valor | Ubicacion |
 | :--- | :--- | :--- |
 | Frecuencia de envio | 50 Hz (20ms) | control_tx.ino loop() |
-| Timeout failsafe | 300 ms | robot_rx.ino TIMEOUT_MS |
-| Intervalo guardado NVS | 50 paquetes (~1s) | control_tx.ino SEQ_SAVE_INTERVAL |
-| Margen seguridad seq | 50 | control_tx.ino setup() |
-| Resolucion PWM | 8 bits (0-255) | robot_rx.ino PWM_RES |
-| Frecuencia PWM | 5000 Hz | robot_rx.ino PWM_FREQ |
-| Deadzone joystick | 20 unidades | robot_rx.ino DEADZONE |
+| Timeout failsafe | 300 ms | robot_rx.ino FAILSAFE_TIMEOUT_MS |
+| Reserva del contador NVS | 50 secuencias (~1s) | control_tx.ino SEQUENCE_BLOCK_SIZE |
+| Limite PWM inicial | 200 de 255 | robot_rx.ino MOTOR_MAX_DUTY |
+| Resolucion PWM | 8 bits (0-255) | robot_rx.ino PWM_RESOLUTION_BITS |
+| Frecuencia PWM | 5000 Hz | robot_rx.ino PWM_FREQUENCY_HZ |
+| Deadzone joystick | 50 de 1000 | control_tx.ino JOYSTICK_DEADZONE |
 | Promedio muestras ADC | 8 lecturas | control_tx.ino readAveraged() |
 | Canal WiFi | Configurable | team_config.h WIFI_CHANNEL |
 
