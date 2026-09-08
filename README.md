@@ -4,128 +4,267 @@
 [![MCU](https://img.shields.io/badge/MCU-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![Protocol](https://img.shields.io/badge/Protocol-ESP--NOW-green.svg)](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_now.html)
 [![Core](https://img.shields.io/badge/Core-Arduino--ESP32%20v3.x-orange.svg)](https://github.com/espressif/arduino-esp32)
-[![Robots](https://img.shields.io/badge/Team-3%20Pairs-purple.svg)]()
+[![Team](https://img.shields.io/badge/Team-3%20Pairs-purple.svg)]()
 
-Sistema de control remoto seguro para robots de fútbol (soccer bots) basado en **ESP32** y **ESP-NOW**. Diseñado específicamente para prevenir sabotajes mediante cifrado nativo, autenticación por MAC y protección anti-replay.
+Sistema de control remoto seguro para robots de fútbol basado en ESP32 y protocolo ESP-NOW. Diseñado para operar 3 pares independientes de control/robot con cifrado nativo, autenticación por MAC, protección anti-replay y failsafe automático.
 
-El sistema opera con 3 pares independientes de control/robot, comunicación analógica de baja latencia (<5ms) y failsafe automático.
+## Arquitectura de Seguridad
 
----
+El sistema reemplaza comunicaciones Bluetooth Classic vulnerables mediante:
 
-## 🛡️ Seguridad y Anti-Sabotaje
+1.  **Cifrado AES + CMAC:** Claves PMK y LMK únicas por par definidas en `team_config.h`. Los paquetes sin claves válidas se descartan a nivel de hardware.
+2.  **Comunicación Unicast:** Cada control envía datos exclusivamente a la MAC de su robot asignado. No existe modo broadcast ni descubrimiento público.
+3.  **Anti-Replay por Secuencia:** Estructura `RemoteMsg` incluye campo `seq` (uint32_t). El robot rechaza cualquier paquete con secuencia menor o igual a la última aceptada.
+4.  **Persistencia NVS en Control:** El contador `seq` se almacena en flash cada 50 paquetes (~1 segundo). Al reiniciar, el control recupera el último valor y suma un margen de seguridad (`SEQ_SAVE_INTERVAL`), evitando bloqueos sin abrir ventanas de replay.
+5.  **Failsafe de 300ms:** Si el robot no recibe paquetes válidos durante 300ms, detiene los motores inmediatamente. Protege contra jamming o pérdida de enlace.
+6.  **Validación de Origen:** El callback `onDataRecv` verifica que `info->src_addr` coincida exactamente con la MAC del control configurado antes de procesar datos.
 
-Diseñado tras incidentes de sabotaje con Bluetooth Classic sin autenticación. Este sistema implementa:
+> Nota de Seguridad: Si el robot se reinicia, su contador `lastSeq` vuelve a cero. En torneos locales sin sniffers RF esto es aceptable. Para entornos hostiles, considerar persistencia de `lastSeq` en robot o botón físico de armado.
 
-- **Cifrado AES + CMAC:** PMK y LMK únicos por par. Sin las claves correctas, los paquetes se descartan a nivel de hardware.
-- **Unicast por MAC:** Cada control solo habla con su robot asignado. No hay broadcast descubrible.
-- **Anti-Replay:** Contador de secuencia (`seq`) monótono. Los paquetes grabados y reenviados son ignorados.
-- **Persistencia NVS:** El contador `seq` se guarda en flash cada 50 paquetes. Si el control se reinicia, recupera el último valor + margen de seguridad, evitando bloqueos sin abrir ventanas de replay.
-- **Failsafe 300ms:** Si el robot pierde señal o detecta jamming, detiene motores automáticamente. No se descontrola.
-- **Validación de Origen:** El robot verifica criptográficamente que el paquete venga exactamente de su control asignado.
+## Diagramas de Conexion
 
-> ⚠️ **Nota de Seguridad:** Si el *robot* se reinicia, su contador `lastSeq` vuelve a cero. En torneos locales sin sniffers RF esto es aceptable. Para entornos hostiles, considerar persistencia de `lastSeq` en robot o botón físico de armado.
-
----
-
-## 🏗️ Arquitectura del Sistema
+### Control Remoto (Transmisor)
 
 ```text
-Control 1 (PAIR_ID=1) ──ESP-NOW Cifrado──> Robot 1
-Control 2 (PAIR_ID=2) ──ESP-NOW Cifrado──> Robot 2
-Control 3 (PAIR_ID=3) ──ESP-NOW Cifrado──> Robot 3
+JOYSTICK KY-023          ESP32 DEVKIT
++-----------+            +----------------+
+| VCC       |------------| 3V3            |
+| GND       |-----+------| GND            |
+| VRx       |--+  |      |                |
+|           |  |  |      |                |
+| VRy       |-+|--+------| GPIO34 (ADC1)  | <-- Cap 100nF a GND
+|           | ||         |                |
+| SW        | |+---------| GPIO27         | <-- INPUT_PULLUP
++-----------+ ||         |                |
+              |+---------| GPIO35 (ADC1)  | <-- Cap 100nF a GND
+              |          |                |
+ALIMENTACION  |          | VIN            |
+TP4056+BOOST  |          | GND            |
+5V OUT -------+----------|                |
+GND -----------+---------|                |
 ```
 
-- **Aislamiento:** Triple barrera (MAC + Claves únicas + Validación en código).
-- **Interferencia:** Nula entre pares propios. Mismo canal WiFi soportado gracias al aislamiento criptográfico.
-- **Latencia:** ~20ms (50Hz) con lectura analógica promediada y filtrada.
+Notas criticas del control:
+- GPIO34 y GPIO35 pertenecen a ADC1. Funcionan correctamente con WiFi/ESP-NOW activo (ADC2 se deshabilita al usar WiFi).
+- Los capacitores ceramicos de 100nF deben soldarse lo mas cerca posible de los pines del ESP32 para filtrar ruido RF.
+- El joystick se alimenta a 3.3V. Nunca conectar a 5V (danaria el ADC del ESP32).
+- GPIO27 usa resistencia pull-up interna. El boton del joystick conecta a GND cuando se presiona.
 
----
+### Robot (Receptor)
 
-## 🔧 Hardware
+```text
+ESP32 DEVKIT             DRIVER L298N               MOTORES
++----------------+       +------------------+       +-----------+
+| GPIO25 (IN1)   |-------| IN1              |       |           |
+| GPIO26 (IN2)   |-------| IN2              |       | MOTOR IZQ |
+| GPIO32 (ENA)   |-------| ENA (SIN JUMPER!)|-------| (2 en     |
+|                |       |                  |       |  paralelo)|
+| GPIO27 (IN3)   |-------| IN3              |       |           |
+| GPIO14 (IN4)   |-------| IN4              |       | MOTOR DER |
+| GPIO33 (ENB)   |-------| ENB (SIN JUMPER!)|-------| (2 en     |
+|                |       |                  |       |  paralelo)|
+| GND            |---+---| GND              |       +-----------+
++----------------+   |   +--------+---------+
+                     |            |
+BATERIA 2S LiPo      |            |
+7.4V + --------------+------------| 12V / VM
+7.4V - ---------------------------| GND
+                     |            |
+CAPACITOR            |            |
+470-1000uF           |            |
+(+ a VM, - a GND) ---+            |
+                     |            |
+REGULADOR/BUCK       |            |
+5V OUT --------------|------------| 5V (si L298N lo provee)
+GND -----------------+------------| GND
+                     |            |
+ESP32 VIN <----------+            |
+ESP32 GND <----------+            |
+```
 
-### Por cada Robot (x3)
-| Componente | Especificación | Notas |
+Advertencias criticas del robot:
+- RETIRAR JUMPERS DE ENA Y ENB: Si los jumpers estan puestos, los pines quedan fijos en HIGH y el PWM del ESP32 no tendra efecto. La velocidad sera siempre maxima o nula.
+- Tierra comun: GND de bateria, driver y ESP32 deben estar conectados entre si.
+- No alimentar motores desde el pin 3.3V o 5V del ESP32. Usar regulador dedicado o salida 5V del L298N solo si la corriente es suficiente.
+- Capacitor electrolitico de 470-1000uF entre VM y GND es obligatorio para absorber picos de corriente y evitar resets del ESP32.
+- Fusible o PTC en positivo de bateria recomendado para proteccion contra cortocircuitos.
+
+## Lista de Materiales (BOM)
+
+### Por cada Robot (Cantidad total para 3 robots)
+
+| Componente | Cantidad por unidad | Total (3 unidades) | Especificacion / Notas |
+| :--- | :--- | :--- | :--- |
+| ESP32 DevKit | 1 | 3 | WROOM-32 o similar |
+| Driver L298N | 1 | 3 | O TB6612FNG como mejora futura |
+| Motor DC con reductora | 2 | 6 | 3-6V, eje D. Se conectan 2 en paralelo por canal |
+| Celda LiPo 3.7V 2000mAh | 2 | 6 | Configuracion serie 2S = 7.4V |
+| BMS 2S 7.4V con balance | 1 | 3 | Proteccion sobre-descarga y balance de celdas |
+| Capacitor electrolitico | 1 | 3 | 470uF a 1000uF, 16V+. Entre VM-GND del driver |
+| Capacitor ceramico | 1 | 3 | 100nF. Cerca de VCC del ESP32 |
+| Fusible o PTC | 1 | 3 | En positivo de bateria. Valor segun stall current |
+| Conector JST-XH | 1 | 3 | Para balance de bateria |
+| Conector JST-SM/T | 2 | 6 | Alimentacion principal y carga |
+| Switch SPDT | 1 | 3 | Obligatorio por reglamento de competencia |
+| LED indicador | 1 | 3 | Con resistencia 220-470 ohm. Obligatorio |
+| Rueda loca | 1 | 3 | Metalica o plastica con rodamiento |
+| Chasis | 1 | 3 | Acrilico 2WD o impresion 3D PLA/PETG |
+
+### Por cada Control (Cantidad total para 3 controles)
+
+| Componente | Cantidad por unidad | Total (3 unidades) | Especificacion / Notas |
+| :--- | :--- | :--- | :--- |
+| ESP32 DevKit | 1 | 3 | WROOM-32 o similar |
+| Joystick KY-023 | 1 | 3 | Modulo analogico 2 ejes + boton |
+| Capacitor ceramico | 2 | 6 | 100nF. Uno en VRx-GND, otro en VRy-GND |
+| Celda 18650 Li-ion | 1 | 3 | Protegida. Samsung/LG/Molicel recomendadas |
+| Modulo TP4056 + Boost 5V | 1 | 3 | Carga 1S + elevacion a 5V para ESP32 |
+| Portapilas 18650 | 1 | 3 | Con switch integrado preferiblemente |
+| Switch ON/OFF | 1 | 3 | Si modulo combo no lo incluye |
+| Carcasa | 1 | 3 | Impresion 3D o caja plastica PVC |
+
+### Herramientas compartidas (no por unidad)
+
+| Herramienta | Cantidad | Uso |
 | :--- | :--- | :--- |
-| MCU | ESP32 DevKit | Core v3.x / IDF 5.x |
-| Driver | L298N o TB6612FNG | **¡Quitar jumpers ENA/ENB en L298N!** |
-| Motores | 4x DC con reductora | 2 en paralelo por lado |
-| Batería | 2S LiPo 7.4V 2000mAh | Con BMS 2S y balance |
-| Protección | Fusible/PTC + Capacitor 470-1000µF | En línea VM-GND |
-| Filtro | Cerámico 100nF | Cerca de VCC ESP32 |
-| Competencia | Switch ON/OFF + LED indicador | **Obligatorio por reglamento** |
+| Multimetro | 1 | Medir corriente stall, verificar continuidad |
+| Soldador + estaño | 1 | Conexiones permanentes |
+| Heatshrink | Varios | Aislamiento de uniones soldadas |
+| Taladro/Dremel | 1 | Solo si chassis es acrilico (para LEDs/switches) |
+| Programador USB | 1 | Solo si ESP32 no tiene USB integrado |
+| Cargador balance 2S | 1 | iMax B6 o similar. TP5100 como alternativa simple |
 
-### Por cada Control (x3)
-| Componente | Especificación | Notas |
-| :--- | :--- | :--- |
-| MCU | ESP32 DevKit | ADC1 (GPIO34/35) para joystick |
-| Input | Joystick KY-023 | Con caps 100nF en VRx/VRy-GND |
-| Batería | 18650 Li-ion protegida | + TP4056 + Boost 5V |
-| Carcasa | Impresa 3D / PVC | Ergonomía personalizada |
+## Estructura del Repositorio
 
-### Chasis
-- **Opción A (Rápida):** Kit acrílico 2WD estándar ("Keyes Smart Car"). Requiere taladrar para LEDs/Switches.
-- **Opción B (Competencia):** Impresión 3D (PLA/PETG ~150g). Permite integración nativa de switches, LEDs y gestión de cables. Modelos STL disponibles en Thingiverse/Cults3D buscando "2WD robot chassis".
-
----
-
-## 💻 Firmware y Configuración
-
-### Estructura del Repositorio
 ```text
 esp-now-soccer-bots/
-├── control_tx/          # Firmware transmisor con persistencia NVS
-│   ├── control_tx.ino
-│   └── team_config.h    # ⛔ NO SUBIR (contiene claves)
-├── robot_rx/            # Firmware receptor con anti-replay
-│   ├── robot_rx.ino
-│   └── team_config.h    # ⛔ NO SUBIR
-├── get_mac/             # Utilidad para obtener MACs
-│   └── get_mac.ino
-├── team_config.h.example # Plantilla segura para commit
-├── .gitignore
-├── LICENSE
-└── README.md
+├── control_tx/
+│   ├── control_tx.ino       # Firmware transmisor con persistencia NVS
+│   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
+├── robot_rx/
+│   ├── robot_rx.ino         # Firmware receptor con anti-replay
+│   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
+├── get_mac/
+│   └── get_mac.ino          # Utilidad para leer MAC de cada ESP32
+├── team_config.h.example    # Plantilla segura para versionar
+├── .gitignore               # Excluye team_config.h real
+├── LICENSE                  # MIT License
+└── README.md                # Este archivo
 ```
 
-### Pasos de Puesta en Marcha
+## Configuracion Inicial
 
-1.  **Obtener MACs:** Flashear `get_mac.ino` en los 6 ESP32 y anotar direcciones.
-2.  **Generar Claves:** Crear PMK/LMK de 16 bytes únicos por par.
-    ```bash
-    python3 -c "import secrets; print(secrets.token_hex(16))"
-    ```
-3.  **Configurar:** Copiar `team_config.h.example` a `team_config.h` en ambas carpetas y rellenar con MACs y claves reales.
-4.  **Asignar Roles:** Definir `#define PAIR_ID 1` (o 2, 3) en cada sketch antes de flashear.
-5.  **Verificar Hardware:** Confirmar que los jumpers de velocidad del L298N estén retirados.
-6.  **Pruebas Unitarias:** Probar cada par individualmente verificando respuesta y failsafe (<300ms al apagar control).
-7.  **Prueba Multi-Par:** Encender los 3 sistemas simultáneamente para validar aislamiento.
+### Paso 1: Obtener MACs
 
----
+Flashear `get_mac.ino` en cada uno de los 6 ESP32 individualmente. Abrir monitor serial a 115200 baudios y anotar la direccion MAC mostrada.
 
-## ⚙️ Detalles Técnicos Clave
+### Paso 2: Generar claves PMK/LMK
 
-- **Joystick Filtering:** Promedio de 8 muestras + filtro RC pasabajos (100nF) para eliminar ruido RF del ESP32 sin introducir lag perceptible.
-- **Control Diferencial:** Mezcla analógica X/Y → Throttle ± Steering. Deadzone configurable (default: 20).
-- **PWM Real:** 5kHz, 8-bit resolución mediante `ledcAttach` (Core 3.x).
-- **Flash Wear:** Escritura NVS limitada a 1Hz (cada 50 paquetes). Ajustable vía `SEQ_SAVE_INTERVAL`.
-- **Alimentación:** Nunca alimentar motores desde regulador 3.3V del ESP32. Usar buck converter o regulador dedicado para lógica.
+Generar 3 pares de claves de 16 bytes cada una. No usar las del ejemplo.
 
----
+```bash
+python3 -c "import secrets; print(secrets.token_hex(16))"
+```
 
-## 📋 Checklist Pre-Competencia
+Ejecutar 6 veces (3 PMK + 3 LMK). Cada par debe tener claves distintas.
 
-- [ ] Failsafe verificado en los 3 robots.
+### Paso 3: Configurar team_config.h
+
+Copiar `team_config.h.example` a `team_config.h` dentro de las carpetas `control_tx/` y `robot_rx/`. Rellenar con:
+- Las 6 MACs reales obtenidas en paso 1.
+- Las 6 claves generadas en paso 2.
+- Canal WiFi deseado (default: 1). Canales recomendados si hay interferencia: 1, 6 u 11.
+
+### Paso 4: Asignar PAIR_ID
+
+En cada sketch, definir el identificador de par antes de compilar:
+
+| Dispositivo | PAIR_ID | Archivo |
+| :--- | :--- | :--- |
+| Control 1 | 1 | control_tx/control_tx.ino |
+| Robot 1 | 1 | robot_rx/robot_rx.ino |
+| Control 2 | 2 | control_tx/control_tx.ino |
+| Robot 2 | 2 | robot_rx/robot_rx.ino |
+| Control 3 | 3 | control_tx/control_tx.ino |
+| Robot 3 | 3 | robot_rx/robot_rx.ino |
+
+### Paso 5: Verificar hardware critico
+
+Antes de encender:
+- Confirmar que jumpers ENA/ENB del L298N estan retirados.
+- Verificar polaridad de bateria y capacitor electrolitico.
+- Confirmar tierra comun entre todos los componentes.
+- Verificar que LEDs y switches estan instalados (requisito de competencia).
+
+### Paso 6: Pruebas unitarias
+
+Para cada par, individualmente:
+1. Encender robot.
+2. Encender control.
+3. Mover joystick en todas direcciones. Verificar respuesta correcta.
+4. Apagar control abruptamente. Verificar que robot detiene motores en menos de 300ms.
+5. Reiniciar control. Verificar que robot acepta comandos inmediatamente (gracias a persistencia NVS).
+
+### Paso 7: Prueba multi-par
+
+Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. Verificar que:
+- Control 1 solo mueve Robot 1.
+- Control 2 solo mueve Robot 2.
+- Control 3 solo mueve Robot 3.
+- No existe interferencia cruzada ni retrasos anormales.
+
+## Parametros Tecnicos del Firmware
+
+| Parametro | Valor | Ubicacion |
+| :--- | :--- | :--- |
+| Frecuencia de envio | 50 Hz (20ms) | control_tx.ino loop() |
+| Timeout failsafe | 300 ms | robot_rx.ino TIMEOUT_MS |
+| Intervalo guardado NVS | 50 paquetes (~1s) | control_tx.ino SEQ_SAVE_INTERVAL |
+| Margen seguridad seq | 50 | control_tx.ino setup() |
+| Resolucion PWM | 8 bits (0-255) | robot_rx.ino PWM_RES |
+| Frecuencia PWM | 5000 Hz | robot_rx.ino PWM_FREQ |
+| Deadzone joystick | 20 unidades | robot_rx.ino DEADZONE |
+| Promedio muestras ADC | 8 lecturas | control_tx.ino readAveraged() |
+| Canal WiFi | Configurable | team_config.h WIFI_CHANNEL |
+
+## Opciones de Chasis
+
+### Opcion A: Kit acrilico 2WD estandar
+- Busqueda: "2WD Robot Chassis Kit Arduino" o "Keyes 2WD Smart Car".
+- Incluye: base acrilica, soportes motor, ruedas, rueda loca, tornilleria.
+- Requiere: taladrar orificios para LEDs, switches y gestion de cables.
+- Ventaja: entrega rapida (1-2 dias), economico, facil reparacion.
+- Desventaja: modificacion mecanica requerida para requisitos de competencia.
+
+### Opcion B: Impresion 3D personalizada
+- Modelos STL: buscar "2WD robot chassis 3D print STL two motors" en Thingiverse/Cults3D.
+- Material: PLA o PETG. ~150g por chassis.
+- Tiempo impresion: 4-8 horas por unidad.
+- Ventaja: orificios nativos para LEDs/switches, diseño optimizado, iteraciones rapidas.
+- Desventaja: requiere acceso a impresora 3D, tiempo de produccion mayor.
+
+## Checklist Pre-Competencia
+
+- [ ] Failsafe verificado en los 3 robots (detencion < 300ms).
 - [ ] Rango real probado en sede del evento.
-- [ ] Consumo medido bajo carga (30 min uso intenso).
-- [ ] Baterías cargadas y balanceadas noche anterior.
-- [ ] Repuestos: ESP32 extra, driver, cables, soldador.
-- [ ] Switches y LEDs funcionales y visibles.
-- [ ] Prueba de interferencia cruzada completada.
+- [ ] Consumo medido bajo carga durante 30 minutos de uso intenso.
+- [ ] 2 juegos de baterias cargadas y balanceadas por robot.
+- [ ] Repuestos disponibles: ESP32 extra, driver, cables, soldador.
+- [ ] Switches y LEDs funcionales y visibles segun reglamento.
+- [ ] Prueba de interferencia cruzada completada con 3 pares activos.
+- [ ] Jumpers ENA/ENB retirados en todos los drivers L298N.
+- [ ] Capacitores instalados en posiciones correctas.
 
----
+## Mejoras Futuras
+
+- Migracion a TB6612FNG para reducir perdidas por calor y mejorar eficiencia.
+- Encoders + PID para correccion de trayectoria y control preciso.
+- Telemetria de retorno: voltaje de bateria y RSSI enviados al control.
+- Persistencia de lastSeq en robot para cerrar ventana de replay tras reinicio.
+- Boton fisico de armado como requisito adicional de seguridad.
 
 ## Licencia
 
-MIT License. Ver archivo [LICENSE](LICENSE).
+MIT License. Ver archivo LICENSE.
 
-*Desarrollado para competencia de robótica 2026. El software se provee "tal cual", sin garantías implícitas de idoneidad para combate o sabotaje activo.*
+El software se provee "tal cual", sin garantias implicitas de idoneidad para combate, sabotaje activo o cumplimiento de reglamentos de competencia especificos. La seguridad implementada es adecuada para torneos locales sin adversarios con equipamiento de sniffing RF profesional.
