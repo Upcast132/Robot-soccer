@@ -1,0 +1,13 @@
+# Configuración sensible con claves y MACs reales
+team_config.h
+
+# Archivos temporales de compilación
+*.bin
+*.elf
+*.map
+build/
+
+# IDE específicos
+.vscode/
+.idea/
+*.swp
