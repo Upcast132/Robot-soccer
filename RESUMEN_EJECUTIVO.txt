@@ -171,7 +171,7 @@ CONTACTO
 ================================================================================
 
 Repositorio: github.com/brayangonzalez261098/Robot-soccer
-Equipo: Upcast (estudiante) + Profesor Braygon González
+Equipo: Upcast (estudiante) + Profesor Brayan González
 Documentos: Ver outputs/ en este directorio
 
 Preguntas: Revisar README en GitHub o contactar al profesor
