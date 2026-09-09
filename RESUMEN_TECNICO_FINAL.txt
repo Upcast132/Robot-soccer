@@ -629,7 +629,7 @@ REPOSITORIO OFICIAL:
 github.com/brayangonzalez261098/Robot-soccer
 
 EQUIPO:
-- Profesor: Braygon González (brayangonzalez261098)
+- Profesor: Brayan González (brayangonzalez261098)
 - Estudiante: Upcast
 
 PROBLEMAS COMUNES Y SOLUCIONES:
