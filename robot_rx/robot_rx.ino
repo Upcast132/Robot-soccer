@@ -27,7 +27,12 @@ constexpr uint8_t PIN_LEFT_ENABLE = 32;
 constexpr uint8_t PIN_RIGHT_IN1 = 27;
 constexpr uint8_t PIN_RIGHT_IN2 = 14;
 constexpr uint8_t PIN_RIGHT_ENABLE = 33;
-constexpr uint8_t PIN_STATUS_LED = 2;
+
+// Status RGB LED (common cathode). Replaces the old single-color status LED.
+// Chosen to avoid every pin already used by the L298N driver above.
+constexpr uint8_t PIN_LED_R = 17;
+constexpr uint8_t PIN_LED_G = 16;
+constexpr uint8_t PIN_LED_B = 4;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t FAILSAFE_TIMEOUT_MS = 300;
@@ -55,6 +60,12 @@ uint32_t lastAppliedSequence = 0;
 void printMac(const uint8_t *mac) {
   Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void setStatusColor(bool r, bool g, bool b) {
+  digitalWrite(PIN_LED_R, r ? HIGH : LOW);
+  digitalWrite(PIN_LED_G, g ? HIGH : LOW);
+  digitalWrite(PIN_LED_B, b ? HIGH : LOW);
 }
 
 void setBridgePins(uint8_t in1, uint8_t in2, uint8_t enablePin,
@@ -169,7 +180,9 @@ void onDataReceived(const esp_now_recv_info_t *info,
   Serial.println();
 
   while (true) {
-    digitalWrite(PIN_STATUS_LED, !digitalRead(PIN_STATUS_LED));
+    setStatusColor(true, false, false);
+    delay(150);
+    setStatusColor(false, false, false);
     delay(150);
   }
 }
@@ -246,8 +259,11 @@ void initializeRadio() {
 }
 
 void setup() {
-  pinMode(PIN_STATUS_LED, OUTPUT);
-  digitalWrite(PIN_STATUS_LED, LOW);
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+  setStatusColor(false, false, true);  // blue: starting up, no packet yet
+
   Serial.begin(SERIAL_BAUD);
   delay(300);
   Serial.printf("Iniciando robot ESP-NOW, par %u\n", PAIR_ID);
@@ -279,7 +295,11 @@ void loop() {
       failsafeActive = true;
       Serial.println("Failsafe activo: motores detenidos");
     }
-    digitalWrite(PIN_STATUS_LED, LOW);
+    if (hasAcceptedPacket) {
+      setStatusColor(true, false, false);  // red: link lost, was connected before
+    } else {
+      setStatusColor(false, false, true);  // blue: still waiting for the first packet
+    }
     delay(1);
     return;
   }
@@ -288,7 +308,7 @@ void loop() {
     failsafeActive = false;
     Serial.println("Enlace valido: control habilitado");
   }
-  digitalWrite(PIN_STATUS_LED, HIGH);
+  setStatusColor(false, true, false);  // green: link active
   if (message.seq != lastAppliedSequence) {
     mixAndDrive(message);
     lastAppliedSequence = message.seq;
