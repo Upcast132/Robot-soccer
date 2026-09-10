@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <esp_err.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -25,7 +27,21 @@ static_assert(PAIR_ID >= 1 && PAIR_ID <= TEAM_PAIR_COUNT,
 constexpr uint8_t PIN_JOYSTICK_X = 35;  // ADC1
 constexpr uint8_t PIN_JOYSTICK_Y = 34;  // ADC1
 constexpr uint8_t PIN_JOYSTICK_BUTTON = 27;
-constexpr uint8_t PIN_STATUS_LED = 2;
+
+// Status RGB LED (common cathode). Replaces the old single-color status LED.
+constexpr uint8_t PIN_LED_R = 25;
+constexpr uint8_t PIN_LED_G = 26;
+constexpr uint8_t PIN_LED_B = 33;
+
+// 16x2 LCD with I2C backpack (PCF8574). Backpack VCC must be wired to the
+// ESP32's 3.3V pin, NOT 5V/VIN: most backpacks pull SDA/SCL up to their own
+// VCC, and 5V on those lines exceeds the ESP32 GPIO absolute maximum. Running
+// the backpack at 3.3V is safe; only the backlight is a bit dimmer.
+constexpr uint8_t LCD_ADDRESS_PRIMARY = 0x27;
+constexpr uint8_t LCD_ADDRESS_SECONDARY = 0x3F;
+constexpr uint8_t LCD_COLUMNS = 16;
+constexpr uint8_t LCD_ROWS = 2;
+constexpr uint32_t LCD_UPDATE_INTERVAL_MS = 300;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SEND_INTERVAL_US = 20000;  // 50 Hz
@@ -35,8 +51,13 @@ constexpr int16_t JOYSTICK_DEADZONE = 50;  // On the normalized -1000..1000 scal
 constexpr bool INVERT_X = false;
 constexpr bool INVERT_Y = true;
 
+// Consecutive send failures before showing "sin senal". A single dropped
+// packet should not trip the alarm; several in a row should.
+constexpr uint8_t SEND_FAILURE_THRESHOLD = 10;  // ~200ms at 50Hz
+
 Preferences preferences;
 const TeamPairConfig &config = teamPair(PAIR_ID);
+LiquidCrystal_I2C lcd(LCD_ADDRESS_PRIMARY, LCD_COLUMNS, LCD_ROWS);
 
 uint16_t centerX = 2048;
 uint16_t centerY = 2048;
@@ -44,10 +65,34 @@ uint32_t nextSequence = 1;
 uint32_t reservedUntil = 1;
 uint32_t nextSendAtUs = 0;
 bool radioReady = false;
+bool lcdAvailable = false;
+bool lastDisplayedLinked = true;
+uint32_t lastLcdUpdateMs = 0;
+
+// Written from the ESP-NOW send callback (WiFi task), read from loop() (app
+// task). A single byte is naturally atomic on ESP32, so volatile alone is
+// enough here; no critical section needed for a lone byte-sized flag.
+volatile uint8_t consecutiveSendFailures = 0;
 
 void printMac(const uint8_t *mac) {
   Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void setStatusColor(bool r, bool g, bool b) {
+  digitalWrite(PIN_LED_R, r ? HIGH : LOW);
+  digitalWrite(PIN_LED_G, g ? HIGH : LOW);
+  digitalWrite(PIN_LED_B, b ? HIGH : LOW);
+}
+
+void lcdShowStatusLine(const char *text) {
+  if (!lcdAvailable) {
+    return;
+  }
+  lcd.setCursor(0, 1);
+  lcd.print("                ");  // clear row 1 (16 spaces)
+  lcd.setCursor(0, 1);
+  lcd.print(text);
 }
 
 [[noreturn]] void fatalError(const char *message, esp_err_t error = ESP_OK) {
@@ -60,8 +105,12 @@ void printMac(const uint8_t *mac) {
   }
   Serial.println();
 
+  lcdShowStatusLine("ERROR FATAL");
+
   while (true) {
-    digitalWrite(PIN_STATUS_LED, !digitalRead(PIN_STATUS_LED));
+    setStatusColor(true, false, false);
+    delay(150);
+    setStatusColor(false, false, false);
     delay(150);
   }
 }
@@ -139,6 +188,49 @@ void advanceSequenceReservation() {
   }
 }
 
+// Real delivery confirmation (peer ACK at the radio layer), not just "queued
+// locally". This is what actually makes the RGB LED and LCD mean something:
+// a robot out of range will show failures here even though esp_now_send()
+// itself returns ESP_OK.
+void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
+  (void)mac;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    consecutiveSendFailures = 0;
+  } else if (consecutiveSendFailures < 255) {
+    ++consecutiveSendFailures;
+  }
+}
+
+void initializeLcd() {
+  Wire.begin();
+
+  uint8_t address = LCD_ADDRESS_PRIMARY;
+  Wire.beginTransmission(LCD_ADDRESS_PRIMARY);
+  if (Wire.endTransmission() != 0) {
+    Wire.beginTransmission(LCD_ADDRESS_SECONDARY);
+    if (Wire.endTransmission() == 0) {
+      address = LCD_ADDRESS_SECONDARY;
+    } else {
+      Serial.println("Aviso: LCD I2C no detectado en 0x27 ni 0x3F. Continuando sin pantalla.");
+      lcdAvailable = false;
+      return;
+    }
+  }
+
+  lcd = LiquidCrystal_I2C(address, LCD_COLUMNS, LCD_ROWS);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  char line0[LCD_COLUMNS + 1];
+  snprintf(line0, sizeof(line0), "Control PAIR %u", PAIR_ID);
+  lcd.setCursor(0, 0);
+  lcd.print(line0);
+
+  lcdAvailable = true;
+  lcdShowStatusLine("Iniciando...");
+}
+
 void initializeRadio() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, true);
@@ -187,6 +279,11 @@ void initializeRadio() {
     fatalError("No se pudo registrar el robot como peer cifrado", error);
   }
 
+  error = esp_now_register_send_cb(onDataSent);
+  if (error != ESP_OK) {
+    fatalError("No se pudo registrar el callback de envio", error);
+  }
+
   radioReady = true;
   Serial.printf("Control del par %u listo en canal %u. Robot: ", PAIR_ID, WIFI_CHANNEL);
   printMac(config.robotMac);
@@ -208,22 +305,40 @@ void sendControlPacket() {
 
   const esp_err_t error = esp_now_send(
       config.robotMac, reinterpret_cast<const uint8_t *>(&message), sizeof(message));
-  digitalWrite(PIN_STATUS_LED, error == ESP_OK ? HIGH : LOW);
   if (error != ESP_OK) {
     Serial.printf("No se pudo encolar paquete %lu: %s\n",
                   static_cast<unsigned long>(message.seq), esp_err_to_name(error));
+    if (consecutiveSendFailures < 255) {
+      ++consecutiveSendFailures;
+    }
   }
   advanceSequenceReservation();
 }
 
+void updateStatusIndicators() {
+  const bool linked = consecutiveSendFailures < SEND_FAILURE_THRESHOLD;
+  setStatusColor(!linked, linked, false);
+
+  const uint32_t now = millis();
+  if (linked != lastDisplayedLinked || (now - lastLcdUpdateMs) >= LCD_UPDATE_INTERVAL_MS) {
+    lastLcdUpdateMs = now;
+    lastDisplayedLinked = linked;
+    lcdShowStatusLine(linked ? "Enlazado" : "Sin senal");
+  }
+}
+
 void setup() {
-  pinMode(PIN_STATUS_LED, OUTPUT);
-  digitalWrite(PIN_STATUS_LED, LOW);
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+  setStatusColor(false, false, true);  // blue: starting up
   pinMode(PIN_JOYSTICK_BUTTON, INPUT_PULLUP);
 
   Serial.begin(SERIAL_BAUD);
   delay(300);
   Serial.printf("Iniciando control ESP-NOW, par %u\n", PAIR_ID);
+
+  initializeLcd();
 
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_JOYSTICK_X, ADC_11db);
@@ -236,6 +351,9 @@ void setup() {
   reserveSequenceBlock();
   initializeRadio();
   nextSendAtUs = micros();
+
+  setStatusColor(false, true, false);  // green: ready
+  lcdShowStatusLine("Enlazado");
 }
 
 void loop() {
@@ -248,5 +366,6 @@ void loop() {
     // Schedule from the current time to avoid a burst after any long pause.
     nextSendAtUs = now + SEND_INTERVAL_US;
     sendControlPacket();
+    updateStatusIndicators();
   }
 }
