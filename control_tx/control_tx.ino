@@ -8,6 +8,7 @@
 #include <esp_wifi.h>
 
 #include "../soccer_protocol.h"
+#include "../esp_now_compat.h"
 
 #if __has_include("team_config.h")
 #include "team_config.h"
@@ -45,15 +46,19 @@ constexpr uint32_t LCD_UPDATE_INTERVAL_MS = 300;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SEND_INTERVAL_US = 20000;  // 50 Hz
-constexpr uint16_t SEQUENCE_BLOCK_SIZE = 50;
+constexpr uint32_t SEQUENCE_BLOCK_SIZE = 10000;
 constexpr uint8_t ADC_SAMPLES = 8;
 constexpr int16_t JOYSTICK_DEADZONE = 50;  // On the normalized -1000..1000 scale
 constexpr bool INVERT_X = false;
 constexpr bool INVERT_Y = true;
 
-// Consecutive send failures before showing "sin senal". A single dropped
-// packet should not trip the alarm; several in a row should.
-constexpr uint8_t SEND_FAILURE_THRESHOLD = 10;  // ~200ms at 50Hz
+constexpr uint32_t STATUS_TIMEOUT_MS = 300;
+constexpr uint16_t CALIBRATION_CENTER_MIN = 1536;
+constexpr uint16_t CALIBRATION_CENTER_MAX = 2560;
+constexpr uint16_t CALIBRATION_MAX_SPREAD = 100;
+constexpr uint16_t CALIBRATION_SAMPLES = 128;
+constexpr uint32_t BUTTON_STABLE_MS = 30;
+constexpr uint8_t SENT_HISTORY_SIZE = 32;
 
 Preferences preferences;
 const TeamPairConfig &config = teamPair(PAIR_ID);
@@ -66,13 +71,22 @@ uint32_t reservedUntil = 1;
 uint32_t nextSendAtUs = 0;
 bool radioReady = false;
 bool lcdAvailable = false;
-bool lastDisplayedLinked = true;
+uint8_t lastDisplayedStatus = 255;
 uint32_t lastLcdUpdateMs = 0;
 
-// Written from the ESP-NOW send callback (WiFi task), read from loop() (app
-// task). A single byte is naturally atomic on ESP32, so volatile alone is
-// enough here; no critical section needed for a lone byte-sized flag.
-volatile uint8_t consecutiveSendFailures = 0;
+// All callback/loop shared data below is protected by statusMux.
+portMUX_TYPE statusMux = portMUX_INITIALIZER_UNLOCKED;
+uint8_t consecutiveSendFailures = 0;
+bool hasRobotStatus = false;
+StatusMsg latestStatus = {};
+uint32_t lastStatusAtMs = 0;
+struct SentPacket {
+  uint32_t seq;
+  uint32_t sentAtMs;
+  bool valid;
+};
+SentPacket sentHistory[SENT_HISTORY_SIZE] = {};
+uint8_t nextHistorySlot = 0;  // loop only
 
 void printMac(const uint8_t *mac) {
   Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X",
@@ -123,25 +137,55 @@ uint16_t readAveraged(uint8_t pin) {
   return static_cast<uint16_t>(sum / ADC_SAMPLES);
 }
 
-void calibrateJoystick() {
-  Serial.println("Deja el joystick centrado: calibrando...");
-  uint32_t sumX = 0;
-  uint32_t sumY = 0;
-  constexpr uint16_t CALIBRATION_SAMPLES = 128;
-
-  for (uint16_t i = 0; i < CALIBRATION_SAMPLES; ++i) {
-    sumX += readAveraged(PIN_JOYSTICK_X);
-    sumY += readAveraged(PIN_JOYSTICK_Y);
-    delay(3);
+void waitForButtonLevel(uint8_t level) {
+  uint32_t stableSince = millis();
+  while (static_cast<uint32_t>(millis() - stableSince) < BUTTON_STABLE_MS) {
+    if (digitalRead(PIN_JOYSTICK_BUTTON) != level) {
+      stableSince = millis();
+    }
+    delay(1);
   }
+}
 
-  centerX = static_cast<uint16_t>(sumX / CALIBRATION_SAMPLES);
-  centerY = static_cast<uint16_t>(sumY / CALIBRATION_SAMPLES);
-  Serial.printf("Centro X=%u, Y=%u\n", centerX, centerY);
-
-  // Values close to a rail usually mean a disconnected or badly wired joystick.
-  if (centerX < 400 || centerX > 3695 || centerY < 400 || centerY > 3695) {
-    fatalError("Joystick fuera de rango; revisa VCC, GND, VRx y VRy");
+void calibrateJoystick() {
+  // Radio is initialized only after successful calibration and button release.
+  while (true) {
+    lcdShowStatusLine("Centrar joystick");
+    Serial.println("Centrar joystick; soltar y pulsar para calibrar");
+    waitForButtonLevel(HIGH);
+    waitForButtonLevel(LOW);
+    uint32_t sumX = 0, sumY = 0;
+    uint16_t minX = 4095, minY = 4095, maxX = 0, maxY = 0;
+    for (uint16_t i = 0; i < CALIBRATION_SAMPLES; ++i) {
+      const uint16_t x = analogRead(PIN_JOYSTICK_X);
+      const uint16_t y = analogRead(PIN_JOYSTICK_Y);
+      sumX += x;
+      sumY += y;
+      minX = min(minX, x);
+      maxX = max(maxX, x);
+      minY = min(minY, y);
+      maxY = max(maxY, y);
+      delay(3);
+    }
+    const uint16_t x = sumX / CALIBRATION_SAMPLES;
+    const uint16_t y = sumY / CALIBRATION_SAMPLES;
+    const bool valid = x >= CALIBRATION_CENTER_MIN && x <= CALIBRATION_CENTER_MAX &&
+                       y >= CALIBRATION_CENTER_MIN && y <= CALIBRATION_CENTER_MAX &&
+                       maxX - minX <= CALIBRATION_MAX_SPREAD &&
+                       maxY - minY <= CALIBRATION_MAX_SPREAD;
+    Serial.printf("Centro X=%u Y=%u; variacion X=%u Y=%u\n",
+                  x, y, maxX - minX, maxY - minY);
+    if (valid) {
+      centerX = x;
+      centerY = y;
+      lcdShowStatusLine("Soltar boton");
+      waitForButtonLevel(HIGH);
+      return;
+    }
+    lcdShowStatusLine("Recalibrar");
+    Serial.println("Recalibrar: centro fuera de rango o captura inestable");
+    waitForButtonLevel(HIGH);
+    delay(1000);
   }
 }
 
@@ -167,12 +211,7 @@ int16_t normalizeAxis(uint16_t raw, uint16_t center, bool invert) {
 void reserveSequenceBlock() {
   nextSequence = preferences.getULong("next_seq", 1);
   reservedUntil = nextSequence + SEQUENCE_BLOCK_SIZE;
-  if (reservedUntil < nextSequence) {
-    // A wrap after years of continuous use starts a new sequence epoch. Both
-    // devices should be power-cycled together if this ever happens.
-    nextSequence = 1;
-    reservedUntil = 1 + SEQUENCE_BLOCK_SIZE;
-  }
+  // Unsigned wrap is intentional; the receiver uses modular comparison.
   if (preferences.putULong("next_seq", reservedUntil) == 0) {
     fatalError("No se pudo reservar el contador anti-replay en NVS");
   }
@@ -188,17 +227,51 @@ void advanceSequenceReservation() {
   }
 }
 
-// Real delivery confirmation (peer ACK at the radio layer), not just "queued
-// locally". This is what actually makes the RGB LED and LCD mean something:
-// a robot out of range will show failures here even though esp_now_send()
-// itself returns ESP_OK.
-void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
-  (void)mac;
+// Radio delivery is diagnostic only; application status confirms the robot.
+void onDataSent(const SoccerSendInfo *info, esp_now_send_status_t status) {
+  (void)info;
+  portENTER_CRITICAL(&statusMux);
   if (status == ESP_NOW_SEND_SUCCESS) {
     consecutiveSendFailures = 0;
   } else if (consecutiveSendFailures < 255) {
     ++consecutiveSendFailures;
   }
+  portEXIT_CRITICAL(&statusMux);
+}
+
+void onRobotStatus(const esp_now_recv_info_t *info,
+                   const uint8_t *data, int length) {
+  if (info == nullptr || data == nullptr || length != sizeof(StatusMsg) ||
+      memcmp(info->src_addr, config.robotMac, sizeof(config.robotMac)) != 0 ||
+      memcmp(info->des_addr, config.controlMac, sizeof(config.controlMac)) != 0) {
+    return;
+  }
+  StatusMsg status = {};
+  memcpy(&status, data, sizeof(status));
+  if (status.magic != SOCCER_STATUS_MAGIC ||
+      status.version != SOCCER_PROTOCOL_VERSION || status.pairId != PAIR_ID ||
+      status.reserved != 0 ||
+      (status.state != RobotState::WAITING && status.state != RobotState::DISARMED &&
+       status.state != RobotState::ARMED) || status.crc16 != soccerStatusCrc(status)) {
+    return;
+  }
+  portENTER_CRITICAL(&statusMux);
+  const uint32_t now = millis();
+  bool recentCommand = false;
+  for (uint8_t i = 0; i < SENT_HISTORY_SIZE; ++i) {
+    if (sentHistory[i].valid && sentHistory[i].seq == status.acceptedSeq &&
+        static_cast<uint32_t>(now - sentHistory[i].sentAtMs) <= STATUS_TIMEOUT_MS) {
+      recentCommand = true;
+      break;
+    }
+  }
+  if (recentCommand && (!hasRobotStatus ||
+      soccerIsNewerSequence(status.acceptedSeq, latestStatus.acceptedSeq))) {
+    latestStatus = status;
+    lastStatusAtMs = now;
+    hasRobotStatus = true;
+  }
+  portEXIT_CRITICAL(&statusMux);
 }
 
 void initializeLcd() {
@@ -284,6 +357,11 @@ void initializeRadio() {
     fatalError("No se pudo registrar el callback de envio", error);
   }
 
+  error = esp_now_register_recv_cb(onRobotStatus);
+  if (error != ESP_OK) {
+    fatalError("No se pudo registrar el receptor de estado", error);
+  }
+
   radioReady = true;
   Serial.printf("Control del par %u listo en canal %u. Robot: ", PAIR_ID, WIFI_CHANNEL);
   printMac(config.robotMac);
@@ -292,7 +370,7 @@ void initializeRadio() {
 
 void sendControlPacket() {
   RemoteMsg message = {};
-  message.magic = SOCCER_PROTOCOL_MAGIC;
+  message.magic = SOCCER_COMMAND_MAGIC;
   message.version = SOCCER_PROTOCOL_VERSION;
   message.pairId = PAIR_ID;
   message.flags = digitalRead(PIN_JOYSTICK_BUTTON) == LOW
@@ -303,27 +381,49 @@ void sendControlPacket() {
   message.throttle = normalizeAxis(readAveraged(PIN_JOYSTICK_Y), centerY, INVERT_Y);
   message.crc16 = soccerMessageCrc(message);
 
+  const uint8_t slot = nextHistorySlot;
+  nextHistorySlot = (nextHistorySlot + 1) % SENT_HISTORY_SIZE;
+  portENTER_CRITICAL(&statusMux);
+  sentHistory[slot] = {message.seq, millis(), true};
+  portEXIT_CRITICAL(&statusMux);
+
   const esp_err_t error = esp_now_send(
       config.robotMac, reinterpret_cast<const uint8_t *>(&message), sizeof(message));
   if (error != ESP_OK) {
     Serial.printf("No se pudo encolar paquete %lu: %s\n",
                   static_cast<unsigned long>(message.seq), esp_err_to_name(error));
+    portENTER_CRITICAL(&statusMux);
+    sentHistory[slot].valid = false;
     if (consecutiveSendFailures < 255) {
       ++consecutiveSendFailures;
     }
+    portEXIT_CRITICAL(&statusMux);
   }
   advanceSequenceReservation();
 }
 
 void updateStatusIndicators() {
-  const bool linked = consecutiveSendFailures < SEND_FAILURE_THRESHOLD;
-  setStatusColor(!linked, linked, false);
+  portENTER_CRITICAL(&statusMux);
+  const bool confirmed = hasRobotStatus;
+  const RobotState state = latestStatus.state;
+  const uint32_t statusAt = lastStatusAtMs;
+  const uint8_t failures = consecutiveSendFailures;
+  portEXIT_CRITICAL(&statusMux);
 
   const uint32_t now = millis();
-  if (linked != lastDisplayedLinked || (now - lastLcdUpdateMs) >= LCD_UPDATE_INTERVAL_MS) {
+  const bool fresh = confirmed && static_cast<uint32_t>(now - statusAt) <= STATUS_TIMEOUT_MS;
+  const uint8_t display = !confirmed ? 0 : !fresh ? 1 :
+                          state == RobotState::ARMED ? 3 : 2;
+  const char *labels[] = {"Esperando robot", "Sin senal", "Desarmado", "Armado"};
+  setStatusColor(display == 1 || display == 2,
+                 display == 2 || display == 3, display == 0);
+  if (display != lastDisplayedStatus || now - lastLcdUpdateMs >= LCD_UPDATE_INTERVAL_MS) {
+    if (display != lastDisplayedStatus) {
+      Serial.printf("%s (fallos de radio consecutivos: %u)\n", labels[display], failures);
+    }
     lastLcdUpdateMs = now;
-    lastDisplayedLinked = linked;
-    lcdShowStatusLine(linked ? "Enlazado" : "Sin senal");
+    lastDisplayedStatus = display;
+    lcdShowStatusLine(labels[display]);
   }
 }
 
@@ -352,8 +452,7 @@ void setup() {
   initializeRadio();
   nextSendAtUs = micros();
 
-  setStatusColor(false, true, false);  // green: ready
-  lcdShowStatusLine("Enlazado");
+  updateStatusIndicators();
 }
 
 void loop() {
