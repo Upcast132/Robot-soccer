@@ -1,500 +1,99 @@
-================================================================================
-TODO CHECKLIST - ROBOT SOCCER ESP-NOW
-================================================================================
+CHECKLIST OPERACIONAL — ROBOT SOCCER V2
+======================================
 
-PRIORIDAD CRÍTICA (HACER ANTES DE COMPILAR CUALQUIER COSA)
-═════════════════════════════════════════════════════════════════════════════
+Todas las casillas son pruebas o preparativos PENDIENTES.
+Esta revisión no compiló, instaló un entorno ni cargó firmware.
+Las simulaciones de Node.js y la revisión de código no validan hardware.
 
-CONFIGURACIÓN DE CLAVES:
-  ☐ [ ] Flashear get_mac.ino en los 6 ESP32, anotar MACs
-         Herramienta: Arduino IDE
-         Archivo: get_mac/get_mac.ino
-         Tiempo: 10 minutos
-         Output esperado: 6 líneas con MACs tipo "A4:CF:12:34:AB:CD"
-  
-  ☐ [ ] Generar 6 claves PMK/LMK propias (16 bytes cada una)
-         Terminal: python3 -c "import secrets; print(secrets.token_hex(16))"
-         Ejecutar: 6 veces
-         Tiempo: 5 minutos
-         Output esperado: 6 strings de 32 caracteres hex
-  
-  ☐ [ ] Crear team_config.h REAL en control_tx/
-         Fuente: team_config.h.example
-         Reemplazar: WIFI_CHANNEL, TEAM_PAIRS[3] con MACs y claves reales
-         NO SUBIR A GIT: agregar a .gitignore
-         Tiempo: 15 minutos
-  
-  ☐ [ ] Crear team_config.h REAL en robot_rx/
-         Fuente: Copiar la de control_tx/ (IDÉNTICO)
-         Verificar: .gitignore excluye ambos
-         Tiempo: 2 minutos
-  
-  ☐ [ ] Validar team_config.h
-         Verificar: todas las MACs son reales (no 0x02,0x00,0x00,...)
-         Verificar: todas las claves tienen 16 bytes (32 caracteres hex)
-         Verificar: PMK de par 1 ≠ PMK de par 2 ≠ PMK de par 3
-         Verificar: LMK de par 1 ≠ LMK de par 2 ≠ LMK de par 3
-         Verificar: WIFI_CHANNEL es 1, 6 u 11
-         Verificar: TEAM_PAIR_COUNT = 3
-         Tiempo: 5 minutos
+DOCUMENTACIÓN Y CONFIGURACIÓN
+[ ] Revisar README.md: conexiones, BOM, parámetros y límites.
+[ ] Actualizar control y robot juntos al protocolo v2.
+[ ] Verificar core Arduino-ESP32 3.x y librería LiquidCrystal_I2C concretos
+    mediante compilación futura de ambos sketches.
+[ ] Verificar PAIR_ID, canal, MACs y PMK/LMK del par en configuración privada.
+[ ] Verificar con git ls-files que ningún team_config.h real está versionado.
+[ ] Guardar copia privada de la configuración; no imprimir claves en reportes.
+[ ] Conservar NVS next_seq. No borrarla para resolver una reconexión.
 
-════════════════════════════════════════════════════════════════════════════════
+HARDWARE, ANTES DE ENERGIZAR
+[ ] Jumpers ENA/ENB retirados de cada L298N.
+[ ] Polaridad de baterías y capacitores correcta, GND común.
+[ ] Motores alimentados desde su driver; ESP32 con regulador dedicado.
+[ ] Protección, cargador y balance apropiados para pack 2S.
+[ ] Joystick a 3.3 V; revisar VRx/VRy, SW y filtro ADC.
+[ ] LCD sin pull-ups a 5 V sobre GPIO; verificar módulo a 3.3 V.
+[ ] Una resistencia por color del RGB y pinout conforme al README.
+[ ] Switch físico funcional, conexiones firmes y ruedas libres.
+[ ] Empezar pruebas con ruedas levantadas y alimentación controlada.
 
-FLASHEO DE FIRMWARE (6 ESP32, uno por uno)
-════════════════════════════════════════════════════════════════════════════════
+PRUEBAS POR PAR — REPETIR PARA 1, 2 Y 3
+[ ] Control con robot apagado: tras calibrar indica Esperando robot (azul).
+    Nunca Armado ni confirmación basada solamente en ACK de radio.
+[ ] LCD Centrar joystick: soltar y pulsar; sin órdenes durante la captura.
+[ ] Centro fuera de 1536…2560 o variación >100 ADC en cualquier eje:
+    Recalibrar, permanece sin transmitir y permite repetir.
+[ ] Calibración válida: Soltar boton; no usar esa pulsación para el armado.
+[ ] Robot al arrancar: azul y frenado; con comandos recientes, amarillo.
+[ ] Con joystick inclinado, arranque/reconexión no permite movimiento.
+[ ] Neutral + botón suelto 500 ms, pulsar y soltar sin mover:
+    robot armado, verde; control Armado/verde cuando recibe estado nuevo.
+[ ] Pulsación prematura, movimiento durante el gesto o pérdida de señal:
+    no armar; exigir otro gesto completo.
+[ ] Armado: comprobar avance, retroceso, giros y mezcla proporcional.
+[ ] Pulsar en movimiento: frena sin rampa y queda desarmado.
+    Soltar con joystick inclinado: debe seguir parado.
+[ ] Rearmar solo después de soltar, neutral 500 ms y nueva pulsación/liberación.
+[ ] Apagar control o cortar paquetes: medir freno tras umbral >300 ms más loop.
+    Robot rojo; registrar también tiempo hasta detención física de ruedas.
+[ ] Reconectar/reiniciar control: recalibrar si reinició; amarillo Desarmado.
+    Repetir armado. No se espera movimiento inmediato por recuperar NVS.
+[ ] Duplicados, versión incompatible, CRC incorrecto, ejes fuera de rango,
+    flags desconocidos y origen/par incorrectos no renuevan el failsafe.
+[ ] Estados antiguos/duplicados/fuera del historial reciente no renuevan LCD.
+[ ] Cortar solo retorno robot→control: Sin senal/rojo tras >300 ms sin estado
+    nuevo. El robot podría seguir recibiendo comandos; registrar diferencia.
+[ ] Verificar rampa en ambos motores, paso por cero y pausa ≥20 ms al invertir.
+[ ] Probar botón/failsafe durante aceleración, desaceleración y pausa:
+    freno sin rampa y ningún objetivo pendiente tras desarmar.
+[ ] En banco, comprobar reinicio cerca de fin de bloque y desbordamiento
+    de uint32_t sin reutilización. No borrar NVS del equipo operativo.
+[ ] Registrar centros/dispersión de cada joystick y latencia real.
 
-CONTROL 1:
-  ☐ [ ] Editar control_tx/control_tx.ino
-         Buscar: #define PAIR_ID
-         Cambiar: #define PAIR_ID 1
-         Guardar
-  
-  ☐ [ ] Conectar ESP32 #1 (MAC del control del par 1) a USB
-  
-  ☐ [ ] Compilar en Arduino IDE
-         Board: ESP32 Dev Module
-         Verificar: 0 errors, algunos warnings OK
-  
-  ☐ [ ] Upload (Flash)
-         Verificar serial output después de reiniciar:
-         "Iniciando control ESP-NOW, par 1"
-         "MAC del control: [correcta]"
-         "Control del par 1 listo en canal X"
-  
-  ☐ [ ] Nota: PAIR_ID 1 en control_tx completado
+PRUEBA CON LOS TRES PARES
+[ ] Calibrar y armar individualmente cada par.
+[ ] Cada control mueve solo su robot y muestra el PAIR_ID correcto.
+[ ] Mantener tráfico cinco minutos y registrar pérdidas/rearmados.
+[ ] Medir latencia real de inicio de respuesta y tiempo de subida de rampa.
+    50 Hz no implica una latencia física garantizada menor que 50 ms.
+[ ] Probar rango e interferencias en sede; registrar distancia y condiciones.
+[ ] Verificar failsafe y nuevo armado de cada par durante la prueba conjunta.
 
-ROBOT 1:
-  ☐ [ ] Editar robot_rx/robot_rx.ino
-         Buscar: #define PAIR_ID
-         Cambiar: #define PAIR_ID 1
-         Guardar
-  
-  ☐ [ ] Conectar ESP32 #2 (MAC del robot del par 1) a USB
-  
-  ☐ [ ] Compilar en Arduino IDE
-  
-  ☐ [ ] Upload
-         Verificar serial output:
-         "Iniciando robot ESP-NOW, par 1"
-         "MAC del robot: [correcta]"
-         "Robot del par 1 listo en canal X"
-  
-  ☐ [ ] Nota: PAIR_ID 1 en robot_rx completado
+MEDICIONES PENDIENTES
+[ ] Tensión, corriente, temperatura y frenado bajo carga por motor/driver.
+[ ] Comprobar salto al PWM mínimo 60; máximo inicial 200/255.
+[ ] Medir autonomía con carga representativa y supervisión.
+[ ] Medir batería externamente: el LED NO indica batería baja.
+[ ] Registrar cualquier reset, calentamiento, caída de tensión o movimiento
+    inesperado; corregir y repetir la prueba afectada antes de competir.
 
-CONTROL 2:
-  ☐ [ ] Editar control_tx/control_tx.ino
-         Cambiar: #define PAIR_ID 2
-  
-  ☐ [ ] Conectar ESP32 #3 (MAC del control del par 2) a USB
-  
-  ☐ [ ] Compilar + Upload
-         Verificar serial: "Control del par 2 listo"
-  
-  ☐ [ ] Nota: PAIR_ID 2 en control_tx completado
+ANTES DE CADA PARTIDA
+[ ] Revisar reglas locales, dimensiones/peso y estado del hardware.
+[ ] Baterías adecuadamente cargadas y conectores sin daño.
+[ ] Calibrar, confirmar Desarmado y completar nuevo gesto de armado.
+[ ] Verificar Armado/verde y respuesta con espacio despejado.
+[ ] Verificar acceso al corte físico de alimentación.
+[ ] Después: apagar, inspeccionar cables, motores, ruedas y driver.
 
-ROBOT 2:
-  ☐ [ ] Editar robot_rx/robot_rx.ino
-         Cambiar: #define PAIR_ID 2
-  
-  ☐ [ ] Conectar ESP32 #4 (MAC del robot del par 2) a USB
-  
-  ☐ [ ] Compilar + Upload
-         Verificar serial: "Robot del par 2 listo"
-  
-  ☐ [ ] Nota: PAIR_ID 2 en robot_rx completado
+REPUESTOS Y REGISTRO
+[ ] Baterías y cargadores adecuados, fusibles, cables, herramientas y multímetro.
+[ ] Configuración privada respaldada; documentación y conexiones disponibles.
+[ ] Placas de respaldo con MAC/PAIR_ID/claves compatibles, verificadas.
+[ ] Registrar versiones de software, parámetros, fecha y resultados físicos.
 
-CONTROL 3:
-  ☐ [ ] Editar control_tx/control_tx.ino
-         Cambiar: #define PAIR_ID 3
-  
-  ☐ [ ] Conectar ESP32 #5 (MAC del control del par 3) a USB
-  
-  ☐ [ ] Compilar + Upload
-         Verificar serial: "Control del par 3 listo"
-  
-  ☐ [ ] Nota: PAIR_ID 3 en control_tx completado
-
-ROBOT 3:
-  ☐ [ ] Editar robot_rx/robot_rx.ino
-         Cambiar: #define PAIR_ID 3
-  
-  ☐ [ ] Conectar ESP32 #6 (MAC del robot del par 3) a USB
-  
-  ☐ [ ] Compilar + Upload
-         Verificar serial: "Robot del par 3 listo"
-  
-  ☐ [ ] Nota: PAIR_ID 3 en robot_rx completado
-
-════════════════════════════════════════════════════════════════════════════════
-
-PRUEBAS UNITARIAS (Par 1)
-════════════════════════════════════════════════════════════════════════════════
-
-Conectividad:
-  ☐ [ ] Encender Robot 1 (alimentación)
-  
-  ☐ [ ] Encender Control 1 (alimentación)
-  
-  ☐ [ ] Esperar 2-3 segundos
-  
-  ☐ [ ] Verificar serial del Robot 1
-         Buscar: "Enlace valido: control habilitado"
-  
-  ☐ [ ] Verificar LED del Robot 1
-         Esperado: HIGH (verde/azul encendido)
-  
-  ☐ [ ] Nota: Conexión establecida
-
-Movimiento:
-  ☐ [ ] Mover joystick del Control 1 completamente ADELANTE
-         Esperado: Robot 1 se mueve ADELANTE
-         Verificar: velocidad constante, no saltos
-  
-  ☐ [ ] Mover joystick del Control 1 completamente ATRÁS
-         Esperado: Robot 1 se mueve ATRÁS
-  
-  ☐ [ ] Mover joystick del Control 1 completamente IZQUIERDA
-         Esperado: Robot 1 gira IZQUIERDA
-  
-  ☐ [ ] Mover joystick del Control 1 completamente DERECHA
-         Esperado: Robot 1 gira DERECHA
-  
-  ☐ [ ] Mover joystick del Control 1 DIAGONAL (adelante-izquierda)
-         Esperado: Robot 1 se mueve diagonalmente (rueda izq lenta, der rápida)
-  
-  ☐ [ ] Presionar BOTÓN del joystick del Control 1
-         Esperado: Robot 1 se detiene inmediatamente
-         Verificar: frena activo (ambos motores detenidos con fuerza)
-  
-  ☐ [ ] Soltar botón
-         Esperado: Control vuelve a responder
-  
-  ☐ [ ] Nota: Movimiento y control funcionales
-
-Failsafe (CRÍTICO):
-  ☐ [ ] Robot 1 y Control 1 funcionando, conectados, LED ON
-  
-  ☐ [ ] Apagar Control 1 ABRUPTAMENTE (desenchufar USB)
-  
-  ☐ [ ] Cronómetro: contar hasta que Robot 1 frene
-         Esperado: < 300 ms (menos de 1 segundo)
-         Verificar: LED pasa a LOW
-         Verificar serial: "Failsafe activo: motores detenidos"
-  
-  ☐ [ ] Encender Control 1 de nuevo
-         Esperar 2-3 segundos
-         Verificar serial del Robot: "Enlace valido: control habilitado"
-         Verificar LED: vuelve a HIGH
-  
-  ☐ [ ] Mover joystick del Control 1
-         Esperado: Robot responde inmediatamente (reconexión sin demora)
-  
-  ☐ [ ] Nota: Failsafe funcional
-
-════════════════════════════════════════════════════════════════════════════════
-
-PRUEBAS UNITARIAS (Pares 2 y 3)
-════════════════════════════════════════════════════════════════════════════════
-
-REPETIR TODOS LOS PASOS ANTERIORES PARA PAR 2:
-  ☐ [ ] Conectividad del par 2
-  ☐ [ ] Movimiento del par 2
-  ☐ [ ] Failsafe del par 2
-
-REPETIR TODOS LOS PASOS ANTERIORES PARA PAR 3:
-  ☐ [ ] Conectividad del par 3
-  ☐ [ ] Movimiento del par 3
-  ☐ [ ] Failsafe del par 3
-
-════════════════════════════════════════════════════════════════════════════════
-
-PRUEBA MULTI-PAR (LOS 3 PARES JUNTOS)
-════════════════════════════════════════════════════════════════════════════════
-
-Encender:
-  ☐ [ ] Encender Robot 1 (alimentación)
-  ☐ [ ] Encender Robot 2 (alimentación)
-  ☐ [ ] Encender Robot 3 (alimentación)
-  ☐ [ ] Esperar 3-5 segundos
-  
-  ☐ [ ] Encender Control 1 (alimentación)
-  ☐ [ ] Encender Control 2 (alimentación)
-  ☐ [ ] Encender Control 3 (alimentación)
-  ☐ [ ] Esperar 3-5 segundos
-
-Aislamiento (CRÍTICO para evitar sabotaje):
-  ☐ [ ] Control 1: mover joystick ADELANTE
-         Verificar Robot 1: se mueve
-         Verificar Robot 2: SE QUEDA QUIETO
-         Verificar Robot 3: SE QUEDA QUIETO
-  
-  ☐ [ ] Control 2: mover joystick ADELANTE
-         Verificar Robot 1: SE QUEDA QUIETO
-         Verificar Robot 2: se mueve
-         Verificar Robot 3: SE QUEDA QUIETO
-  
-  ☐ [ ] Control 3: mover joystick ADELANTE
-         Verificar Robot 1: SE QUEDA QUIETO
-         Verificar Robot 2: SE QUEDA QUIETO
-         Verificar Robot 3: se mueve
-  
-  ☐ [ ] Nota: AISLAMIENTO VERIFICADO - NO HAY INTERFERENCIA
-
-Latencia:
-  ☐ [ ] Mover cualquier joystick
-         Verificar: Robot responde en < 50ms (casi instantáneo)
-         NO debe haber lag perceptible
-  
-  ☐ [ ] Nota: LATENCIA ACEPTABLE
-
-Estabilidad:
-  ☐ [ ] Dejar los 3 pares encendidos durante 5 minutos
-  ☐ [ ] No debe haber desconexiones inesperadas
-  ☐ [ ] LEDs de los 3 robots deben permanecer en HIGH
-  ☐ [ ] No debe haber warnings en los seriales
-  ☐ [ ] Nota: ESTABILIDAD VERIFICADA
-
-════════════════════════════════════════════════════════════════════════════════
-
-MEDICIONES Y VALIDACIÓN TÉCNICA
-════════════════════════════════════════════════════════════════════════════════
-
-Consumo de Batería:
-  ☐ [ ] Multímetro: medir corriente del Robot 1 en reposo
-         Anotar: _____ mA (esperado: 100-200 mA)
-  
-  ☐ [ ] Multímetro: medir corriente del Robot 1 en movimiento suave
-         Anotar: _____ mA (esperado: 500-1000 mA)
-  
-  ☐ [ ] Multímetro: medir corriente del Robot 1 a máxima velocidad
-         Anotar: _____ mA (esperado: 2000-3000 mA)
-  
-  ☐ [ ] Evaluación:
-         Si consumo máximo > 3500 mA: considerar reducir MOTOR_MAX_DUTY
-         Si consumo máximo > 4000 mA: considerar migrar a TB6612FNG
-
-Duración de Batería (Crítico):
-  ☐ [ ] Cargar todos los pares al 100%
-  
-  ☐ [ ] Encender Robot 1 + Control 1
-  
-  ☐ [ ] Usar a máxima velocidad durante 30 minutos sin parar
-  
-  ☐ [ ] Anotar tiempo hasta que LED del Robot comience a parpadear
-         (indicador de voltaje bajo: ~6.8V en 2S)
-  
-  ☐ [ ] Calcular:
-         Duración total = tiempo anotado
-         Número de partidas = duración / tiempo típico de partida (4-5 min)
-  
-  ☐ [ ] Si número de partidas < 3:
-         ALERTA: llevar 3 juegos de baterías por robot
-         Considerar mejorar a TB6612FNG antes de competencia
-
-Rango de Comunicación:
-  ☐ [ ] En la sede del EVENTO (no en casa)
-         Interferencia de RF es distinta en cada ubicación
-  
-  ☐ [ ] Robot 1 + Control 1 encendidos y funcionando
-  
-  ☐ [ ] Alejar Control 1 del Robot 1 gradualmente
-  
-  ☐ [ ] Anotar distancia máxima donde:
-         - Joystick sigue siendo responsivo (< 100ms lag)
-         - LED del Robot permanece HIGH
-         - No hay desconexiones por timeout
-  
-  ☐ [ ] Anotar: _____ metros (esperado: 50-100 metros)
-  
-  ☐ [ ] Si rango < 30 metros:
-         CRÍTICO: revisar WIFI_CHANNEL
-         Intentar: cambiar de canal 1 a 6 a 11 (menos saturado)
-         Reiniciar y probar de nuevo
-  
-  ☐ [ ] Nota: RANGO VERIFICADO
-
-════════════════════════════════════════════════════════════════════════════════
-
-PREPARACIÓN PRE-COMPETENCIA (1 SEMANA ANTES)
-════════════════════════════════════════════════════════════════════════════════
-
-Hardware:
-  ☐ [ ] Todos los motores funcionan correctamente
-  ☐ [ ] Todas las ruedas giran libremente (sin fricción anómala)
-  ☐ [ ] LEDs indicadores encendidos y visibles desde > 2 metros
-  ☐ [ ] Switches de encendido/apagado funcionan (encenden y apagan motores)
-  ☐ [ ] Capacitores correctamente soldados (no frío, no levantado)
-  ☐ [ ] Jumpers ENA/ENB retirados de los 3 módulos L298N
-  ☐ [ ] Fusibles/PTCs instalados en positivo de batería
-
-Batería:
-  ☐ [ ] Cargar TODAS las baterías al 100% (9 x 18650 del robot, 3 x 18650 del control)
-  ☐ [ ] Verificar voltaje con multímetro:
-         - 18650 cargado: ~4.2V
-         - Pack 2S cargado: ~8.4V
-  ☐ [ ] Guardar baterías en bolsa antiestática en lugar fresco
-  ☐ [ ] Preparar 2 juegos de baterías por robot (totales: 6 packs 2S + 6 x 18650)
-
-Software:
-  ☐ [ ] Verificar que team_config.h NO ESTÁ en Git
-         Terminal: git status
-         Verificar: "team_config.h" aparece en .gitignore, NO en archivos de seguimiento
-  
-  ☐ [ ] Crear copia de seguridad de team_config.h
-         Guardar en USB encriptado o archivo protegido
-  
-  ☐ [ ] Crear documento de emergencia con MACs y claves
-         Formato: puede ser impreso o digital, pero PROTEGIDO
-  
-  ☐ [ ] Verificar que todos los 6 ESP32 tienen firmware flasheado
-         Conectar uno por uno, verificar salida serial
-
-Pruebas:
-  ☐ [ ] Última ronda de pruebas unitarias (pares 1, 2, 3)
-  ☐ [ ] Última prueba multi-par (los 6 ESP32 juntos)
-  ☐ [ ] Failsafe verificado nuevamente en los 3 robots
-  ☐ [ ] Medición de latencia: < 50ms
-
-Kit de Emergencia:
-  ☐ [ ] Soldador portátil (batería o USB)
-  ☐ [ ] Desoldador manual
-  ☐ [ ] Cables pre-soldados (jumpers, JST)
-  ☐ [ ] 3 x ESP32 extra (sin flashear)
-  ☐ [ ] 3 x módulos L298N extra
-  ☐ [ ] Fusibles de repuesto
-  ☐ [ ] Batería 18650 extra cargada
-  ☐ [ ] Cable USB para reprogramación en campo
-  ☐ [ ] Multímetro (medir voltaje/continuidad)
-  ☐ [ ] Cinta aislante y heatshrink
-  ☐ [ ] Destornilladores (plano, Phillips)
-
-════════════════════════════════════════════════════════════════════════════════
-
-DURANTE COMPETENCIA (EN LA SEDE DEL EVENTO)
-════════════════════════════════════════════════════════════════════════════════
-
-Llegada (2-3 horas antes de la primera partida):
-  ☐ [ ] Desempacar todos los robots y controles
-  ☐ [ ] Verificación visual: sin daños por transporte
-  ☐ [ ] Conectar USB a cada robot y control, verificar serial output
-         Esperado: "Iniciando robot ESP-NOW, par X"
-  
-  ☐ [ ] Prueba de rango en la sede
-         Anotar WIFI_CHANNEL óptimo (si hay interferencia, cambiar)
-  
-  ☐ [ ] Prueba final de failsafe
-         Apagar control, verificar freno < 300ms
-  
-  ☐ [ ] Cargar batería del control (si está baja)
-
-Antes de cada partida:
-  ☐ [ ] Verificar que baterías del robot están cargadas
-  ☐ [ ] Encender robot y control, esperar 3 segundos
-  ☐ [ ] Serial del robot debe mostrar: "Enlace valido: control habilitado"
-  ☐ [ ] LED del robot debe estar HIGH (verde/azul)
-  ☐ [ ] Mover joystick para verificar responsividad
-  ☐ [ ] LISTO PARA JUGAR
-
-Después de cada partida:
-  ☐ [ ] Apagar robot y control
-  ☐ [ ] Si batería del robot está baja (< 6.9V): CAMBIAR INMEDIATAMENTE
-  ☐ [ ] Si quedan más de 15 minutos antes de la siguiente partida: recargar control
-  ☐ [ ] Inspeccionar daños menores (cables flojos, soldaduras frías, etc.)
-
-Si falla algo durante competencia:
-  ☐ [ ] Control no responde:
-         → Cambiar a control respaldo (requiere 5 min de reprogramación con PAIR_ID)
-         → O cambiar robot a control de otro par (no permitido por reglamento, probablemente)
-  
-  ☐ [ ] Robot no enciende:
-         → Cambiar batería 2S (llevar 2 juegos)
-         → Si problema persiste: usar robot de respaldo (reprogramar PAIR_ID)
-  
-  ☐ [ ] Frenado lento (failsafe no activa rápido):
-         → Verificar capacitor electrolítico (no inflado, no frío)
-         → Verificar conexión de GND
-  
-  ☐ [ ] Latencia alta (lag):
-         → Cambiar WIFI_CHANNEL (si permite reglamento)
-         → Verificar que team_config.h tiene claves correctas
-  
-  ☐ [ ] Interferencia de otro equipo:
-         → Coordinar cambio de WIFI_CHANNEL con otros equipos
-         → Alejar equipos si es posible
-
-════════════════════════════════════════════════════════════════════════════════
-
-SEGURIDAD Y COMPLIANCE
-════════════════════════════════════════════════════════════════════════════════
-
-Antes de viajar al evento:
-  ☐ [ ] Verificar que reglamento de competencia permite ESP-NOW
-  ☐ [ ] Verificar que reglamento exige LEDs indicadores (✓ en nuestro diseño)
-  ☐ [ ] Verificar que reglamento exige switches de encendido/apagado (✓)
-  ☐ [ ] Verificar dimensiones máximas del robot (dentro de límite)
-  ☐ [ ] Verificar peso máximo del robot (dentro de límite)
-  ☐ [ ] Verificar que baterías LiPo cumplen con regulaciones de transporte
-         (Si viajas en avión: verificar capacidad mAh permitida)
-
-En la sede:
-  ☐ [ ] Registrar los 3 robots en el torneo
-  ☐ [ ] Presentar documentation de seguridad (este documento)
-  ☐ [ ] Demostrar failsafe a los árbitros si lo piden
-  ☐ [ ] Demostrar que no hay interferencia entre equipos
-
-════════════════════════════════════════════════════════════════════════════════
-
-CHECKLIST FINAL DE VIAJE
-════════════════════════════════════════════════════════════════════════════════
-
-Robots/Hardware:
-  ☐ [ ] 3 x robots ensamblados
-  ☐ [ ] 3 x controles ensamblados
-  ☐ [ ] 6 juegos de baterías 2S (2 por robot)
-  ☐ [ ] 3 cargadores TP4056 + 3 baterías 18650 para controles
-  ☐ [ ] Cargador de balance 2S
-  ☐ [ ] Cables USB para reprogramación
-
-Software:
-  ☐ [ ] Copia de seguridad de team_config.h (USB encriptado)
-  ☐ [ ] Documento impreso con MACs y claves (en sobre cerrado)
-  ☐ [ ] Arduino IDE instalado en laptop
-  ☐ [ ] Librerías ESP32 Core v3.x actualizadas
-
-Herramientas:
-  ☐ [ ] Soldador portátil + estaño
-  ☐ [ ] Multímetro digital
-  ☐ [ ] Destornilladores
-  ☐ [ ] Cables de repuesto
-  ☐ [ ] 3 x ESP32 extra
-  ☐ [ ] 3 x módulos L298N extra
-  ☐ [ ] Fusibles y PTCs de repuesto
-
-Documentación:
-  ☐ [ ] Este checklist impreso
-  ☐ [ ] Documento de configuración (MACs/claves, protegido)
-  ☐ [ ] Fotos de conexiones correctas (para referencia)
-  ☐ [ ] Reglamento de competencia impreso
-
-Persona a cargo:
-  ☐ [ ] Responsable asignado de verificar checklist
-  ☐ [ ] Teléfono o email de soporte disponible (profesor)
-  ☐ [ ] Ropa cómoda para manejo de equipos en pista
-
-════════════════════════════════════════════════════════════════════════════════
-
-FIRMA Y APROBACIÓN
-════════════════════════════════════════════════════════════════════════════════
-
-Equipo:                                           Fecha:
-_________________________________              ______________
-
-Profesor:                                         Fecha:
-_________________________________              ______________
-
-Revisado por (Técnico/Árbitro):                 Fecha:
-_________________________________              ______________
-
-Estado Final: [ ] LISTO PARA COMPETENCIA
-
-════════════════════════════════════════════════════════════════════════════════
+Par: ______  Core/librerías: __________________  Commit: _______________
+Centro X/Y y dispersión: ______________________________________________
+Latencia / freno / inversión: _________________________________________
+Corriente / tensión / temperatura / autonomía: ________________________
+Observaciones: _______________________________________________________
+Responsable: ______________________________  Fecha: ___________________
+[ ] Pruebas completadas y resultado revisado por el responsable del equipo.

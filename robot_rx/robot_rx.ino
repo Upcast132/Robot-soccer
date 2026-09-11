@@ -45,6 +45,11 @@ constexpr uint8_t PWM_FULL_SCALE = (1U << PWM_RESOLUTION_BITS) - 1;
 constexpr uint8_t MOTOR_MAX_DUTY = 200;
 constexpr uint8_t MOTOR_MIN_DUTY = 60;
 constexpr int16_t COMMAND_DEADZONE = 50;
+constexpr uint32_t ARM_NEUTRAL_MS = 500;
+constexpr uint32_t STATUS_INTERVAL_MS = 100;  // 10 Hz, plus state changes
+constexpr uint32_t MOTOR_UPDATE_MS = 10;
+constexpr int16_t MOTOR_RAMP_STEP = 40;
+constexpr uint32_t MOTOR_REVERSE_PAUSE_MS = 20;
 constexpr bool LEFT_MOTOR_REVERSED = false;
 constexpr bool RIGHT_MOTOR_REVERSED = false;
 
@@ -54,8 +59,29 @@ RemoteMsg latestMessage = {};
 uint32_t latestPacketAtMs = 0;
 uint32_t lastAcceptedSequence = 0;
 bool hasAcceptedPacket = false;
-bool failsafeActive = true;
-uint32_t lastAppliedSequence = 0;
+// Gesture and safety transitions are evaluated for EVERY accepted packet under
+// commandMux, so a short stop press cannot be overwritten by a later command.
+RobotState robotState = RobotState::WAITING;
+enum class ArmPhase : uint8_t { NEED_RELEASE, NEUTRAL, READY, PRESSED };
+ArmPhase armPhase = ArmPhase::NEED_RELEASE;
+uint32_t neutralSinceMs = 0;
+bool brakePending = true;
+uint32_t stateGeneration = 0;
+
+// Motor output and status sending belong exclusively to loop().
+struct MotorRamp {
+  int16_t output = 0;
+  int8_t lastDirection = 0;
+  uint32_t zeroSinceMs = 0;
+  bool holdingZero = false;
+};
+MotorRamp leftRamp, rightRamp;
+int16_t targetLeft = 0, targetRight = 0;
+uint32_t lastMotorUpdateMs = 0;
+bool leftPwmReady = false, rightPwmReady = false;
+uint32_t lastStatusSentMs = 0;
+uint32_t sentStateGeneration = 0;
+bool statusSent = false;
 
 void printMac(const uint8_t *mac) {
   Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X",
@@ -73,6 +99,15 @@ void setBridgePins(uint8_t in1, uint8_t in2, uint8_t enablePin,
   command = constrain(command, -1000, 1000);
   if (reversed) {
     command = -command;
+  }
+
+  const bool pwmReady = enablePin == PIN_LEFT_ENABLE ? leftPwmReady : rightPwmReady;
+  if (!pwmReady) {
+    // Also leave a failed/unattached PWM channel in the braking pin state.
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
+    digitalWrite(enablePin, HIGH);
+    return;
   }
 
   // Remove drive before changing bridge direction to reduce current spikes.
@@ -104,16 +139,16 @@ void drive(int16_t left, int16_t right) {
 }
 
 void brakeAll() {
+  leftRamp = {};
+  rightRamp = {};
+  leftRamp.zeroSinceMs = rightRamp.zeroSinceMs = millis();
+  leftRamp.holdingZero = rightRamp.holdingZero = true;
+  targetLeft = targetRight = 0;
+  lastMotorUpdateMs = millis();
   drive(0, 0);
 }
 
-void mixAndDrive(const RemoteMsg &message) {
-  // The joystick button acts as a hold-to-stop emergency control.
-  if ((message.flags & SOCCER_FLAG_JOYSTICK_BUTTON) != 0) {
-    brakeAll();
-    return;
-  }
-
+void updateTargets(const RemoteMsg &message) {
   int32_t throttle = message.throttle;
   int32_t steering = message.steering;
   if (abs(throttle) < COMMAND_DEADZONE) {
@@ -130,12 +165,108 @@ void mixAndDrive(const RemoteMsg &message) {
     left = (left * 1000) / largest;
     right = (right * 1000) / largest;
   }
-  drive(static_cast<int16_t>(left), static_cast<int16_t>(right));
+  targetLeft = static_cast<int16_t>(left);
+  targetRight = static_cast<int16_t>(right);
 }
 
-bool isNewerSequence(uint32_t candidate, uint32_t previous) {
-  // Signed subtraction keeps comparisons valid across the uint32_t wrap.
-  return static_cast<int32_t>(candidate - previous) > 0;
+// Explicit prototype avoids Arduino sketch auto-prototypes preceding the type.
+int16_t updateMotorRamp(MotorRamp &motor, int16_t target, uint32_t now);
+int16_t updateMotorRamp(MotorRamp &motor, int16_t target, uint32_t now) {
+  if (motor.output == 0 && motor.holdingZero) {
+    if (static_cast<uint32_t>(now - motor.zeroSinceMs) < MOTOR_REVERSE_PAUSE_MS) {
+      return 0;
+    }
+    motor.holdingZero = false;
+  }
+  const int8_t targetDirection = target > 0 ? 1 : target < 0 ? -1 : 0;
+  // Decelerate to zero first. Remember the previous direction even at zero.
+  const bool reversing = targetDirection != 0 && motor.lastDirection != 0 &&
+                         targetDirection != motor.lastDirection;
+  const int16_t effectiveTarget = reversing && motor.output != 0 ? 0 : target;
+  const int16_t previous = motor.output;
+  if (motor.output < effectiveTarget) {
+    motor.output = min(static_cast<int16_t>(motor.output + MOTOR_RAMP_STEP), effectiveTarget);
+  } else if (motor.output > effectiveTarget) {
+    motor.output = max(static_cast<int16_t>(motor.output - MOTOR_RAMP_STEP), effectiveTarget);
+  }
+  if (motor.output != 0) {
+    motor.lastDirection = motor.output > 0 ? 1 : -1;
+  } else if (previous != 0) {
+    motor.zeroSinceMs = now;
+    motor.holdingZero = true;
+  }
+  return motor.output;
+}
+
+// The following state helpers require commandMux to be held by the caller.
+void setRobotState(RobotState state) {
+  if (robotState != state) {
+    robotState = state;
+    ++stateGeneration;
+  }
+}
+
+void cancelArmGesture() {
+  armPhase = ArmPhase::NEED_RELEASE;
+  neutralSinceMs = 0;
+}
+
+void loseLink() {
+  setRobotState(RobotState::WAITING);
+  cancelArmGesture();
+  brakePending = true;
+}
+
+void processArmGesture(const RemoteMsg &message, uint32_t now) {
+  const bool pressed = (message.flags & SOCCER_FLAG_JOYSTICK_BUTTON) != 0;
+  const bool neutral = abs(message.throttle) < COMMAND_DEADZONE &&
+                       abs(message.steering) < COMMAND_DEADZONE;
+  if (robotState == RobotState::WAITING) {
+    setRobotState(RobotState::DISARMED);
+  }
+  if (robotState == RobotState::ARMED) {
+    if (pressed) {
+      setRobotState(RobotState::DISARMED);
+      cancelArmGesture();
+      brakePending = true;
+    }
+    return;
+  }
+  if (!neutral) {
+    cancelArmGesture();
+    return;
+  }
+  switch (armPhase) {
+    case ArmPhase::NEED_RELEASE:
+      if (!pressed) {
+        neutralSinceMs = now;
+        armPhase = ArmPhase::NEUTRAL;
+      }
+      break;
+    case ArmPhase::NEUTRAL:
+      if (pressed) {
+        // A new press may be the packet that completes the 500 ms interval.
+        if (static_cast<uint32_t>(now - neutralSinceMs) >= ARM_NEUTRAL_MS) {
+          armPhase = ArmPhase::PRESSED;
+        } else {
+          cancelArmGesture();
+        }
+      } else if (static_cast<uint32_t>(now - neutralSinceMs) >= ARM_NEUTRAL_MS) {
+        armPhase = ArmPhase::READY;
+      }
+      break;
+    case ArmPhase::READY:
+      if (pressed) {
+        armPhase = ArmPhase::PRESSED;
+      }
+      break;
+    case ArmPhase::PRESSED:
+      if (!pressed) {
+        setRobotState(RobotState::ARMED);
+        cancelArmGesture();
+      }
+      break;
+  }
 }
 
 void onDataReceived(const esp_now_recv_info_t *info,
@@ -146,24 +277,36 @@ void onDataReceived(const esp_now_recv_info_t *info,
   if (memcmp(info->src_addr, config.controlMac, sizeof(config.controlMac)) != 0) {
     return;
   }
+  if (memcmp(info->des_addr, config.robotMac, sizeof(config.robotMac)) != 0) {
+    return;
+  }
 
   RemoteMsg message = {};
   memcpy(&message, incomingData, sizeof(message));
-  if (message.magic != SOCCER_PROTOCOL_MAGIC ||
+  if (message.magic != SOCCER_COMMAND_MAGIC ||
       message.version != SOCCER_PROTOCOL_VERSION ||
       message.pairId != PAIR_ID ||
+      (message.flags & ~SOCCER_KNOWN_FLAGS) != 0 ||
+      message.throttle < -1000 || message.throttle > 1000 ||
+      message.steering < -1000 || message.steering > 1000 ||
       message.crc16 != soccerMessageCrc(message)) {
     return;
   }
 
   portENTER_CRITICAL(&commandMux);
-  if (hasAcceptedPacket && !isNewerSequence(message.seq, lastAcceptedSequence)) {
+  if (hasAcceptedPacket && !soccerIsNewerSequence(message.seq, lastAcceptedSequence)) {
     portEXIT_CRITICAL(&commandMux);
     return;
   }
+  const uint32_t now = millis();
+  // Detect a gap here too, even if loop() was delayed while packets resumed.
+  if (hasAcceptedPacket && now - latestPacketAtMs > FAILSAFE_TIMEOUT_MS) {
+    loseLink();
+  }
+  processArmGesture(message, now);
   lastAcceptedSequence = message.seq;
   latestMessage = message;
-  latestPacketAtMs = millis();
+  latestPacketAtMs = now;
   hasAcceptedPacket = true;
   portEXIT_CRITICAL(&commandMux);
 }
@@ -193,8 +336,12 @@ void initializeMotors() {
   pinMode(PIN_RIGHT_IN1, OUTPUT);
   pinMode(PIN_RIGHT_IN2, OUTPUT);
 
-  if (!ledcAttach(PIN_LEFT_ENABLE, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS) ||
-      !ledcAttach(PIN_RIGHT_ENABLE, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS)) {
+  pinMode(PIN_LEFT_ENABLE, OUTPUT);
+  pinMode(PIN_RIGHT_ENABLE, OUTPUT);
+  brakeAll();
+  leftPwmReady = ledcAttach(PIN_LEFT_ENABLE, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS);
+  rightPwmReady = ledcAttach(PIN_RIGHT_ENABLE, PWM_FREQUENCY_HZ, PWM_RESOLUTION_BITS);
+  if (!leftPwmReady || !rightPwmReady) {
     fatalError("No se pudieron configurar los canales PWM");
   }
   brakeAll();
@@ -265,53 +412,79 @@ void setup() {
   setStatusColor(false, false, true);  // blue: starting up, no packet yet
 
   Serial.begin(SERIAL_BAUD);
+  initializeMotors();
   delay(300);
   Serial.printf("Iniciando robot ESP-NOW, par %u\n", PAIR_ID);
 
-  initializeMotors();
   initializeRadio();
 }
 
-void loop() {
-  RemoteMsg message = {};
-  uint32_t packetAtMs = 0;
-  bool packetAvailable = false;
-
-  portENTER_CRITICAL(&commandMux);
-  packetAvailable = hasAcceptedPacket;
-  if (packetAvailable) {
-    message = latestMessage;
-    packetAtMs = latestPacketAtMs;
-  }
-  portEXIT_CRITICAL(&commandMux);
-
-  const uint32_t now = millis();
-  const bool linkIsFresh = packetAvailable &&
-                           static_cast<uint32_t>(now - packetAtMs) <= FAILSAFE_TIMEOUT_MS;
-
-  if (!linkIsFresh) {
-    if (!failsafeActive) {
-      brakeAll();
-      failsafeActive = true;
-      Serial.println("Failsafe activo: motores detenidos");
-    }
-    if (hasAcceptedPacket) {
-      setStatusColor(true, false, false);  // red: link lost, was connected before
-    } else {
-      setStatusColor(false, false, true);  // blue: still waiting for the first packet
-    }
-    delay(1);
+void sendRobotStatus(const RemoteMsg &message, RobotState state,
+                     uint32_t generation, uint32_t now) {
+  if (statusSent && generation == sentStateGeneration &&
+      now - lastStatusSentMs < STATUS_INTERVAL_MS) {
     return;
   }
-
-  if (failsafeActive) {
-    failsafeActive = false;
-    Serial.println("Enlace valido: control habilitado");
+  StatusMsg status = {};
+  status.magic = SOCCER_STATUS_MAGIC;
+  status.version = SOCCER_PROTOCOL_VERSION;
+  status.pairId = PAIR_ID;
+  status.state = state;
+  status.acceptedSeq = message.seq;
+  status.crc16 = soccerStatusCrc(status);
+  const esp_err_t error = esp_now_send(config.controlMac,
+      reinterpret_cast<const uint8_t *>(&status), sizeof(status));
+  // Rate-limit failed attempts too. The next periodic status retries naturally.
+  lastStatusSentMs = now;
+  sentStateGeneration = generation;
+  statusSent = true;
+  if (error != ESP_OK) {
+    Serial.printf("No se pudo encolar estado: %s\n", esp_err_to_name(error));
   }
-  setStatusColor(false, true, false);  // green: link active
-  if (message.seq != lastAppliedSequence) {
-    mixAndDrive(message);
-    lastAppliedSequence = message.seq;
+}
+
+void loop() {
+  portENTER_CRITICAL(&commandMux);
+  const uint32_t now = millis();
+  const bool packetAvailable = hasAcceptedPacket;
+  const bool linkIsFresh = packetAvailable &&
+                          now - latestPacketAtMs <= FAILSAFE_TIMEOUT_MS;
+  if (!linkIsFresh) {
+    loseLink();
+  }
+  const RemoteMsg message = latestMessage;
+  const RobotState state = robotState;
+  const uint32_t generation = stateGeneration;
+  const bool mustBrake = brakePending;
+  brakePending = false;
+  portEXIT_CRITICAL(&commandMux);
+
+  // Never perform GPIO/PWM, ESP-NOW sends or Serial work in the callback/lock.
+  if (mustBrake || state != RobotState::ARMED || !linkIsFresh) {
+    brakeAll();
+  } else {
+    updateTargets(message);
+    if (now - lastMotorUpdateMs >= MOTOR_UPDATE_MS) {
+      lastMotorUpdateMs = now;  // No catch-up burst after a delayed iteration.
+      const int16_t left = updateMotorRamp(leftRamp, targetLeft, now);
+      const int16_t right = updateMotorRamp(rightRamp, targetRight, now);
+      drive(left, right);
+    }
+  }
+
+  if (!packetAvailable) {
+    setStatusColor(false, false, true);
+  } else if (!linkIsFresh) {
+    setStatusColor(true, false, false);
+  } else {
+    setStatusColor(state != RobotState::ARMED, true, false);
+  }
+  if (packetAvailable) {
+    if (!statusSent || generation != sentStateGeneration) {
+      Serial.printf("Estado robot: %s\n", state == RobotState::ARMED ? "Armado" :
+                    state == RobotState::DISARMED ? "Desarmado" : "Esperando / failsafe");
+    }
+    sendRobotStatus(message, state, generation, now);
   }
   delay(1);
 }

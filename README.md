@@ -8,42 +8,60 @@
 
 Sistema de control remoto seguro para robots de fútbol basado en ESP32 y protocolo ESP-NOW. Diseñado para operar 3 pares independientes de control/robot con cifrado nativo, autenticación por MAC, protección anti-replay, failsafe automático, e indicadores de estado (LED RGB en control y robot, LCD 16x2 en el control).
 
-## Arquitectura de Seguridad
+## Estado de esta revisión
 
-El sistema reemplaza comunicaciones Bluetooth Classic vulnerables mediante:
+Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Compatibilidad prevista con Arduino-ESP32 3.x; **no se compiló, no se instaló un entorno y no se probó ni cargó firmware en hardware** en esta revisión.
 
-1.  **Cifrado AES + CMAC:** Claves PMK y LMK únicas por par definidas en `team_config.h`. Los paquetes sin claves válidas se descartan a nivel de hardware.
-2.  **Comunicación Unicast:** Cada control envía datos exclusivamente a la MAC de su robot asignado. No existe modo broadcast ni descubrimiento público.
-3.  **Anti-Replay por Secuencia:** Estructura `RemoteMsg` incluye campo `seq` (uint32_t). El robot rechaza cualquier paquete con secuencia menor o igual a la última aceptada.
-4.  **Persistencia NVS en Control:** El contador `seq` se almacena en flash cada 50 paquetes (~1 segundo). Al reiniciar, el control recupera el último valor y suma un margen de seguridad (`SEQUENCE_BLOCK_SIZE`), evitando bloqueos sin abrir ventanas de replay.
-5.  **Failsafe de 300ms:** Si el robot no recibe paquetes válidos durante 300ms, detiene los motores inmediatamente. Protege contra jamming o pérdida de enlace.
-6.  **Validación de Origen:** El callback `onDataRecv` verifica que `info->src_addr` coincida exactamente con la MAC del control configurado antes de procesar datos.
+Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. Esta revisión de cabeceras no demuestra que los sketches compilen.
 
-> Nota de Seguridad: Si el robot se reinicia, su contador `lastSeq` vuelve a cero. En torneos locales sin sniffers RF esto es aceptable. Para entornos hostiles, considerar persistencia de `lastSeq` en robot o botón físico de armado.
+## Protocolo y seguridad
 
-## Indicadores de Estado
+- Unicast cifrado en ambos sentidos con PMK/LMK del par; MAC de origen y destino, versión, identificador de mensaje, PAIR_ID y CRC se validan antes de procesar.
+- `RemoteMsg` conserva sus campos y tamaño de **18 bytes**: magic (4), version (1), pairId (1), flags (2), seq (4), throttle (2), steering (2), crc16 (2). Identificador de comando: `SOCCER_COMMAND_MAGIC = 0x534F4343`.
+- `StatusMsg` tiene **14 bytes**: magic (4), version (1), pairId (1), state (1), reserved (1, cero), acceptedSeq (4), crc16 (2). Identificador de estado: `SOCCER_STATUS_MAGIC = 0x534F4353`. Estados: espera=0, desarmado=1, armado=2.
+- Ambos mensajes están empaquetados, usan enteros de ancho fijo en el orden nativo little-endian del ESP32 y CRC16 CCITT (inicio 0xFFFF, polinomio 0x1021) sobre los bytes anteriores al CRC. El CRC detecta errores; la protección criptográfica corresponde a ESP-NOW.
+- Solo se aceptan ejes entre −1000 y 1000 y flags conocidos (bit 0: botón). Un paquete inválido, duplicado o atrasado no renueva el failsafe ni avanza el gesto de armado.
+- La comparación modular acepta una distancia de secuencia entre 1 y 2³¹−1, incluido el paso de UINT32_MAX a cero. El receptor conserva su última secuencia al perder señal.
+- El control guarda en `soccer_tx/next_seq` el final exclusivo de un bloque **antes de usarlo**. Reserva 10 000 secuencias: aproximadamente una escritura cada 200 s a 50 Hz, más la reserva al arrancar. Tras reiniciar comienza en el final del bloque anterior y reserva otro; puede saltarse hasta 10 000 números, sin reutilizar los ya emitidos. Se conserva la clave existente, incluso al migrar desde bloques de 50.
+- El desbordamiento es modular; cero es válido y no se reinicia arbitrariamente a uno. Como en cualquier comparación de media ventana, saltos acumulados de 2³¹ o más sin recepción no se pueden ordenar. No borrar NVS para resolver una desconexión.
+- El robot responde como máximo cada 100 ms en régimen estable y además al cambiar de estado, usando la última secuencia aceptada. El control exige avance y correspondencia con uno de sus últimos 32 envíos, realizado hace como máximo 300 ms. Estados duplicados, antiguos o de otra ejecución no confirman un enlace nuevo.
+- Las secciones críticas protegen los datos compartidos. El receptor valida cada gesto en el callback y conserva una petición de frenado hasta que `loop()` la atienda, aunque otro paquete haya reemplazado el comando. LCD, PWM, envío de estado y diagnósticos se ejecutan fuera de callbacks y bloqueos.
 
-Cada control y cada robot tiene un LED RGB (cátodo común) que muestra el estado del enlace sin necesidad de leer texto:
+El último contador del robot vive en RAM: un reinicio pierde el historial anti-replay del receptor. El armado no sustituye una autenticación de sesión ni cierra esa limitación. Las MAC y claves reales deben permanecer fuera de Git; esta revisión no crea configuraciones privadas ni borra NVS.
 
-| Color | Significado en el Control | Significado en el Robot |
+## Calibración, armado y parada
+
+1. Al encender el control, dejar ambos ejes centrados. El LCD indica **Centrar joystick**. Soltar el botón y pulsarlo para iniciar la captura.
+2. Se toman 128 lecturas por eje. Ambos promedios deben estar entre **1536 y 2560** inclusive; el máximo menos el mínimo de las lecturas debe ser **≤100 ADC** en cada eje. Los límites son constantes ajustables.
+3. Si falla, aparece **Recalibrar**. Soltar el botón; tras un segundo vuelve la indicación de centrar y se permite otra pulsación. Durante toda la calibración la radio aún no está inicializada y no se envían órdenes.
+4. Si pasa, aparece **Soltar boton**. Se exige una liberación estable de 30 ms antes de iniciar la radio. La pulsación de calibración no cuenta para armar.
+5. Con enlace confirmado y **Desarmado**, mantener ambos ejes en neutral y el botón suelto durante **500 ms**, pulsar y soltar sin abandonar neutral. El robot valida el gesto con paquetes nuevos. Neutral significa valor absoluto de cada eje menor que 50 en la escala normalizada.
+6. Solo **Armado** permite movimiento. Pulsar el botón aplica frenado sin rampa al procesar el paquete y deja el robot desarmado. Soltar con el joystick inclinado no reanuda el movimiento.
+7. Al superar **300 ms** sin un comando válido nuevo, el robot frena y vuelve a espera. Al recuperar paquetes queda desarmado: es obligatorio repetir el gesto completo. Desplazar cualquier eje durante el intento o perder señal lo cancela.
+
+El failsafe se atiende en la siguiente iteración después de superar 300 ms; no se promete una detención mecánica en menos de 300 ms. La pulsación debe llegar en un paquete: el botón remoto no sustituye un corte físico de alimentación. Un error fatal del robot frena antes del diagnóstico; si el control deja de enviar por un error fatal, el robot depende del failsafe.
+
+## Indicadores de estado
+
+| Color | Control | Robot |
 | :--- | :--- | :--- |
-| Azul sólido | Arrancando / calibrando joystick | Arrancó, esperando el primer paquete válido |
-| Verde sólido | Últimos envíos confirmados por el robot (ACK real, no solo encolado) | Enlace activo, recibiendo paquetes dentro de 300ms |
-| Rojo sólido | Varios envíos seguidos sin confirmación (robot fuera de rango o apagado) | Perdió el enlace, failsafe activo (ya se había conectado antes) |
-| Rojo parpadeando rápido | Error fatal (`esp_now_init()` u otra falla de arranque) | Error fatal (`esp_now_init()` u otra falla de arranque) |
+| Azul sólido | Inicio/calibración o **Esperando robot**, todavía sin confirmación válida | Espera el primer comando válido |
+| Amarillo (rojo + verde) | **Desarmado**, respuesta reciente sin permiso de movimiento | Paquetes recientes, desarmado |
+| Verde sólido | **Armado**, confirmado por el firmware del robot | Armado y con comandos recientes |
+| Rojo sólido | **Sin senal**, más de 300 ms sin una confirmación nueva tras haber recibido alguna | Más de 300 ms sin comando nuevo tras haberse conectado |
+| Rojo intermitente rápido | **ERROR FATAL** | Error fatal con freno aplicado |
 
-El color del control usa el callback `esp_now_register_send_cb()`, que confirma entrega real a nivel de radio (ACK del peer), no solo que el paquete se encoló localmente. Esto es lo que hace que "rojo = fuera de rango" sea un dato real y no una señal que casi nunca se enciende.
+El éxito del callback de envío queda como diagnóstico de radio; no habilita el verde. Al arrancar con el robot apagado el LCD permanece en **Esperando robot**, aunque la radio local esté lista. La confirmación puede demorarse respecto al estado local del robot; una pérdida solo en el retorno puede mostrar rojo en el control mientras el robot todavía recibe comandos.
 
-Además, cada control tiene una pantalla LCD 16x2 con backpack I2C que muestra:
+El LCD conserva `Control PAIR X` en la primera fila. La segunda muestra los mensajes de calibración y enlace anteriores; se refresca cada 300 ms o al detectar un cambio. Si no hay LCD, seguir las indicaciones por Serial.
 
-```
-Fila 1: Control PAIR X
-Fila 2: Enlazado / Sin senal / ERROR FATAL
-```
+> El backpack I2C no debe elevar SDA/SCL a 5 V. El cableado propuesto usa VCC de 3.3 V; comprobar que el módulo concreto funciona a esa tensión. Un módulo que requiera 5 V necesita adaptación de nivel adecuada.
 
-La fila 2 se actualiza cada ~300ms o al cambiar de estado, lo que ocurra primero, para no meter latencia en el ciclo de envío de 20ms.
+## Movimiento progresivo
 
-> Advertencia eléctrica: El backpack I2C del LCD debe alimentarse desde el pin **3.3V** del ESP32, no desde 5V/VIN. La mayoría de los backpacks PCF8574 tienen pull-ups de SDA/SCL hacia su propio VCC; a 5V esas líneas superan el máximo absoluto de los GPIO del ESP32 (~3.6V) y pueden dañarlos. A 3.3V funciona correctamente, solo el backlight queda un poco más tenue.
+La mezcla diferencial mantiene la reescala proporcional a ±1000. Cada motor cambia como máximo **40 unidades de mando cada 10 ms**. Para invertir, baja hasta cero y permanece allí **20 ms** antes de aplicar el sentido contrario. La pausa también se conserva si el objetivo cambia mientras está a cero. No se acumulan pasos para ejecutarlos de golpe tras una demora.
+
+El botón, el failsafe y un error fatal del robot omiten la rampa: frenan y borran objetivos y progreso pendientes. Se mantienen PWM a 5 kHz y 8 bits, mínimo 60 y máximo 200 de 255 en movimiento; cero aplica el frenado activo existente. La rampa limita el mando, no garantiza una variación uniforme del par: el primer mando distinto de cero aún aplica el PWM mínimo. La respuesta eléctrica y mecánica debe medirse.
 
 ## Diagramas de Conexion
 
@@ -162,7 +180,7 @@ Advertencias criticas del robot:
 | Conector JST-XH | 1 | 3 | Para balance de bateria |
 | Conector JST-SM/T | 2 | 6 | Alimentacion principal y carga |
 | Switch SPDT | 1 | 3 | Obligatorio por reglamento de competencia |
-| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado (azul/verde/rojo). Obligatorio por reglamento |
+| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado (azul/amarillo/verde/rojo). Obligatorio por reglamento |
 | **Resistencia 220-330 ohm** | 3 | 9 | Una por cada pata de color del LED RGB |
 | Rueda loca | 1 | 3 | Metalica o plastica con rodamiento |
 | Chasis | 1 | 3 | Acrilico 2WD o impresion 3D PLA/PETG |
@@ -178,7 +196,7 @@ Advertencias criticas del robot:
 | Modulo TP4056 + Boost 5V | 1 | 3 | Carga 1S + elevacion a 5V para ESP32 |
 | Portapilas 18650 | 1 | 3 | Con switch integrado preferiblemente |
 | Switch ON/OFF | 1 | 3 | Si modulo combo no lo incluye |
-| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado del enlace (azul/verde/rojo) |
+| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado del enlace (azul/amarillo/verde/rojo) |
 | **Resistencia 220-330 ohm** | 3 | 9 | Una por cada pata de color del LED RGB |
 | **Pantalla LCD 16x2 con backpack I2C** | 1 | 3 | Muestra PAIR_ID y estado del enlace. Alimentar a 3.3V, no 5V |
 | Carcasa | 1 | 3 | Impresion 3D o caja plastica PVC |
@@ -208,7 +226,9 @@ El robot no necesita librerias nuevas; el LED RGB usa `digitalWrite()` estandar.
 
 ```text
 esp-now-soccer-bots/
-├── soccer_protocol.h       # Formato de paquete y CRC compartidos
+├── soccer_protocol.h       # Comandos v2, estados y CRC compartidos
+├── esp_now_compat.h        # Firma de envío según ESP-IDF
+├── tests/simulate_safety.cjs # Simulaciones lógicas con Node.js, sin compilar
 ├── control_tx/
 │   ├── control_tx.ino       # Firmware transmisor: NVS, LED RGB, LCD I2C
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
@@ -271,21 +291,25 @@ Antes de encender:
 - Confirmar que el backpack del LCD esta alimentado a 3.3V, no a 5V.
 - Confirmar que las 3 patas de cada LED RGB tienen su resistencia individual.
 
-### Paso 6: Pruebas unitarias
+### Paso 6: Pruebas manuales pendientes
 
-Para cada par, individualmente:
-1. Encender robot. Verificar LED azul (esperando control).
-2. Encender control. Verificar LED azul mientras calibra, luego verde. LCD muestra "Control PAIR X" y "Enlazado".
-3. Mover joystick en todas direcciones. Verificar respuesta correcta.
-4. Presionar el boton del joystick y verificar que actua como parada mientras se mantiene pulsado.
-5. Apagar control abruptamente. Verificar que el L298N entra en frenado en menos de 300ms y el LED del robot pasa a rojo.
-6. Reiniciar control. Verificar que robot acepta comandos inmediatamente (gracias a persistencia NVS) y ambos LEDs vuelven a verde.
-7. Alejar el control del robot hasta perder rango. Verificar que el LED y el LCD del control cambian a "Sin senal" tras varios envios fallidos seguidos.
-8. Medir voltaje y corriente de cada motor bajo carga antes de aumentar `MOTOR_MAX_DUTY`.
+Realizar primero con las ruedas levantadas, por cada par:
+
+1. Encender solo el control y completar calibración: nunca debe indicar Armado ni enlace confirmado; debe mostrar Esperando robot.
+2. Calibrar con joystick inclinado y después moviéndolo durante la captura: debe pedir Recalibrar, permitir otro intento y no enviar comandos.
+3. Arrancar el robot con el joystick desplazado: permanecer frenado. Centrar, esperar 500 ms con botón suelto, pulsar y soltar en neutral; comprobar Armado.
+4. Interrumpir el gesto con movimiento o pérdida de señal, incluido entre pulsación y liberación: no debe armar.
+5. Armado y en movimiento, pulsar el botón; mantener joystick inclinado al soltar. Debe frenar y permanecer desarmado hasta otro gesto completo.
+6. Apagar el control o interrumpir los paquetes durante más de 300 ms. Medir cuándo se aplica el freno y cuándo paran las ruedas. Reconectar o reiniciar el control: recalibrar si reinició y repetir el armado.
+7. Inyectar en un banco controlado duplicados, CRC incorrecto, flags desconocidos, ejes fuera de rango y versión anterior. Ninguno debe renovar el failsafe. Repetir con estados duplicados/antiguos: no deben renovar la confirmación del LCD.
+8. Interrumpir únicamente el retorno robot→control: tras 300 ms sin estado nuevo, el control debe indicar Sin senal. Medir el comportamiento con pérdida y reordenamiento.
+9. Verificar subida gradual e inversión en ambos motores: paso por cero, pausa mínima de 20 ms y frenado sin rampa durante aceleración, desaceleración y pausa.
+10. Verificar reinicio del control cerca del final de un bloque NVS y avance modular cerca de UINT32_MAX en un banco de pruebas, sin borrar NVS del equipo operativo.
+11. Medir latencia real, dispersión ADC de cada joystick, tensión/corriente de motor, frenado y temperatura del driver bajo carga antes de ajustar parámetros.
 
 ### Paso 7: Prueba multi-par
 
-Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. Verificar que:
+Encender los 3 controles y 3 robots, calibrar y armar cada par en el mismo espacio fisico. Verificar que:
 - Control 1 solo mueve Robot 1, y su LCD muestra "Control PAIR 1".
 - Control 2 solo mueve Robot 2, y su LCD muestra "Control PAIR 2".
 - Control 3 solo mueve Robot 3, y su LCD muestra "Control PAIR 3".
@@ -297,14 +321,22 @@ Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. 
 | :--- | :--- | :--- |
 | Frecuencia de envio | 50 Hz (20ms) | control_tx.ino loop() |
 | Timeout failsafe | 300 ms | robot_rx.ino FAILSAFE_TIMEOUT_MS |
-| Reserva del contador NVS | 50 secuencias (~1s) | control_tx.ino SEQUENCE_BLOCK_SIZE |
+| Reserva del contador NVS | 10 000 secuencias (~200 s) | control_tx.ino SEQUENCE_BLOCK_SIZE |
 | Limite PWM inicial | 200 de 255 | robot_rx.ino MOTOR_MAX_DUTY |
 | Resolucion PWM | 8 bits (0-255) | robot_rx.ino PWM_RESOLUTION_BITS |
 | Frecuencia PWM | 5000 Hz | robot_rx.ino PWM_FREQUENCY_HZ |
 | Deadzone joystick | 50 de 1000 | control_tx.ino JOYSTICK_DEADZONE |
 | Promedio muestras ADC | 8 lecturas | control_tx.ino readAveraged() |
 | Canal WiFi | Configurable | team_config.h WIFI_CHANNEL |
-| Umbral de fallos para LED/LCD rojo | 10 envios seguidos (~200ms) | control_tx.ino SEND_FAILURE_THRESHOLD |
+| Caducidad de confirmación | 300 ms | control_tx.ino STATUS_TIMEOUT_MS |
+| Centros de calibración | 1536…2560 ADC | control_tx.ino CALIBRATION_CENTER_MIN/MAX |
+| Variación máxima de captura | 100 ADC (máximo − mínimo) | control_tx.ino CALIBRATION_MAX_SPREAD |
+| Captura de calibración | 128 lecturas por eje | control_tx.ino CALIBRATION_SAMPLES |
+| Neutral previo al armado | 500 ms | robot_rx.ino ARM_NEUTRAL_MS |
+| Estado periódico | 100 ms, más cambios de estado | robot_rx.ino STATUS_INTERVAL_MS |
+| Actualización de motores | 10 ms | robot_rx.ino MOTOR_UPDATE_MS |
+| Paso máximo de rampa | 40 unidades de mando | robot_rx.ino MOTOR_RAMP_STEP |
+| Pausa a cero | 20 ms | robot_rx.ino MOTOR_REVERSE_PAUSE_MS |
 | Intervalo de refresco del LCD | 300 ms | control_tx.ino LCD_UPDATE_INTERVAL_MS |
 | Direcciones I2C del LCD probadas | 0x27, luego 0x3F | control_tx.ino initializeLcd() |
 
@@ -326,7 +358,7 @@ Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. 
 
 ## Checklist Pre-Competencia
 
-- [ ] Failsafe verificado en los 3 robots (detencion < 300ms).
+- [ ] Failsafe verificado en los 3 robots (umbral de 300 ms y tiempo de frenado medido).
 - [ ] Rango real probado en sede del evento.
 - [ ] Consumo medido bajo carga durante 30 minutos de uso intenso.
 - [ ] 2 juegos de baterias cargadas y balanceadas por robot.
@@ -335,15 +367,23 @@ Encender los 3 controles y 3 robots simultaneamente en el mismo espacio fisico. 
 - [ ] Prueba de interferencia cruzada completada con 3 pares activos.
 - [ ] Jumpers ENA/ENB retirados en todos los drivers L298N.
 - [ ] Capacitores instalados en posiciones correctas.
-- [ ] LED RGB de cada control y cada robot cambia de color correctamente (azul/verde/rojo).
+- [ ] LED RGB de cada control y cada robot cambia de color correctamente (azul/amarillo/verde/rojo).
 - [ ] LCD de cada control muestra el PAIR_ID correcto y responde a cambios de estado.
 - [ ] Backpack de cada LCD confirmado a 3.3V, no a 5V.
+
+## Verificación realizada sin compilar
+
+Se revisaron las rutas de calibración, validación, armado, parada, failsafe, acceso compartido, respuesta de estado y error fatal. Se comprobaron diferencias y espacios con `git diff --check`.
+
+La simulación reproducible `node tests/simulate_safety.cjs` usa únicamente Node.js, sin dependencias nuevas. Comprueba modelos de secuencias/reserva NVS con reinicios y desbordamiento, armado y cancelación, confirmaciones, límites de calibración y rampas con inversión y parada. Lee los parámetros del código para detectar diferencias de configuración. **Son simulaciones de lógica, no ejecución ni pruebas del firmware C++**, y no modelan Wi-Fi, FreeRTOS, ADC, NVS física o el puente H.
+
+No se compiló ni se hicieron pruebas físicas. Quedan pendientes las pruebas manuales anteriores, especialmente compatibilidad completa de librerías, latencia real, calibración de cada joystick, frenado y comportamiento eléctrico.
 
 ## Mejoras Futuras
 
 - Migracion a TB6612FNG para reducir perdidas por calor y mejorar eficiencia.
 - Encoders + PID para correccion de trayectoria y control preciso.
-- Telemetria de retorno real: voltaje de bateria y RSSI del robot enviados al control y mostrados en el LCD (distinto del estado de enlace ya implementado, que solo refleja la vista del propio control).
+- Ampliar el retorno de estado con medición de voltaje de batería y RSSI.
 - Persistencia de lastSeq en robot para cerrar ventana de replay tras reinicio.
 - Boton fisico de armado como requisito adicional de seguridad.
 
