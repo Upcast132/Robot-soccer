@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-// Copy this file as team_config.h inside control_tx/ and robot_rx/.
+// Copy this file as team_config.h in the same sketch folder.
 // Replace every example MAC and key before flashing. Never commit the copies.
 struct TeamPairConfig {
   uint8_t controlMac[6];

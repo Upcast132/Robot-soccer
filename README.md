@@ -10,9 +10,9 @@ Sistema de control remoto seguro para robots de fútbol basado en ESP32 y protoc
 
 ## Estado de esta revisión
 
-Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Compatibilidad prevista con Arduino-ESP32 3.x; **no se compiló, no se instaló un entorno y no se probó ni cargó firmware en hardware** en esta revisión.
+Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Control y robot compilan con Arduino CLI 1.5.2-rc.1, Arduino-ESP32 3.3.11 y FQBN `esp32:esp32:esp32`, usando las cabeceras locales y `PAIR_ID=1`. **No se probó ni cargó firmware en hardware**.
 
-Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. Esta revisión de cabeceras no demuestra que los sketches compilen.
+Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `control_tx/esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. La compilación comprobada con 3.3.11 no valida todas las versiones del núcleo.
 
 ## Protocolo y seguridad
 
@@ -216,7 +216,7 @@ Advertencias criticas del robot:
 
 Ademas del core Arduino-ESP32, el control necesita:
 
-- **LiquidCrystal_I2C** (por Frank de Brabander o equivalente): Arduino IDE → Library Manager → buscar "LiquidCrystal I2C" → instalar.
+- **LiquidCrystal I2C 1.1.2** (Frank de Brabander): versión usada para comprobar la compilación. Instalar con `arduino-cli lib install "LiquidCrystal I2C@1.1.2"`. Emite advertencias de arquitectura AVR y constantes obsoletas; compila con ESP32 3.3.11, pero queda pendiente probar el LCD físico.
 
 La direccion I2C del backpack varia segun el chip: el firmware prueba automaticamente `0x27` y luego `0x3F` al arrancar. Si tu backpack usa otra direccion, corre un sketch escaner I2C estandar para encontrarla y agregala en `initializeLcd()`.
 
@@ -226,22 +226,26 @@ El robot no necesita librerias nuevas; el LED RGB usa `digitalWrite()` estandar.
 
 ```text
 esp-now-soccer-bots/
-├── soccer_protocol.h       # Comandos v2, estados y CRC compartidos
-├── esp_now_compat.h        # Firma de envío según ESP-IDF
 ├── tests/simulate_safety.cjs # Simulaciones lógicas con Node.js, sin compilar
 ├── control_tx/
 │   ├── control_tx.ino       # Firmware transmisor: NVS, LED RGB, LCD I2C
+│   ├── soccer_protocol.h   # Comandos v2, estados y CRC
+│   ├── esp_now_compat.h    # Firma de envío según ESP-IDF
+│   ├── team_config.example.h # Plantilla pública de configuración
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
 ├── robot_rx/
 │   ├── robot_rx.ino         # Firmware receptor: anti-replay, LED RGB
+│   ├── soccer_protocol.h   # Misma definición de protocolo que el control
+│   ├── team_config.example.h # Misma plantilla pública que el control
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
 ├── get_mac/
 │   └── get_mac.ino          # Utilidad para leer MAC de cada ESP32
-├── team_config.h.example    # Plantilla segura para versionar
 ├── .gitignore               # Excluye team_config.h real
 ├── LICENSE                  # MIT License
 └── README.md                # Este archivo
 ```
+
+Cada carpeta de sketch contiene las cabeceras propias del proyecto que necesita y puede copiarse por separado. Las bibliotecas Arduino/ESP32 y `LiquidCrystal I2C` se instalan en el entorno. Al cambiar `soccer_protocol.h` o `team_config.example.h`, actualizar ambas copias; `node tests/simulate_safety.cjs` verifica que coincidan.
 
 ## Configuracion Inicial
 
@@ -261,7 +265,7 @@ Ejecutar 6 veces (3 PMK + 3 LMK). Cada par debe tener claves distintas.
 
 ### Paso 3: Configurar team_config.h
 
-Copiar `team_config.h.example` a `team_config.h` dentro de las carpetas `control_tx/` y `robot_rx/`. Rellenar con:
+Dentro de cada carpeta `control_tx/` y `robot_rx/`, copiar su `team_config.example.h` local a `team_config.h`. Rellenar con:
 - Las 6 MACs reales obtenidas en paso 1.
 - Las 6 claves generadas en paso 2.
 - Canal WiFi deseado (default: 1). Canales recomendados si hay interferencia: 1, 6 u 11.
@@ -371,13 +375,23 @@ Encender los 3 controles y 3 robots, calibrar y armar cada par en el mismo espac
 - [ ] LCD de cada control muestra el PAIR_ID correcto y responde a cambios de estado.
 - [ ] Backpack de cada LCD confirmado a 3.3V, no a 5V.
 
-## Verificación realizada sin compilar
+## Verificación realizada
 
 Se revisaron las rutas de calibración, validación, armado, parada, failsafe, acceso compartido, respuesta de estado y error fatal. Se comprobaron diferencias y espacios con `git diff --check`.
 
 La simulación reproducible `node tests/simulate_safety.cjs` usa únicamente Node.js, sin dependencias nuevas. Comprueba modelos de secuencias/reserva NVS con reinicios y desbordamiento, armado y cancelación, confirmaciones, límites de calibración y rampas con inversión y parada. Lee los parámetros del código para detectar diferencias de configuración. **Son simulaciones de lógica, no ejecución ni pruebas del firmware C++**, y no modelan Wi-Fi, FreeRTOS, ADC, NVS física o el puente H.
 
-No se compiló ni se hicieron pruebas físicas. Quedan pendientes las pruebas manuales anteriores, especialmente compatibilidad completa de librerías, latencia real, calibración de cada joystick, frenado y comportamiento eléctrico.
+El 15 de septiembre de 2026 se compilaron y enlazaron control y robot con las cabeceras locales, Arduino-ESP32 3.3.11 y `PAIR_ID=1`. Desde la raíz del repositorio:
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all --build-path build/control_tx control_tx
+arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all --build-path build/robot_rx robot_rx
+node tests/simulate_safety.cjs
+```
+
+Control: 922 472 bytes de programa (70 %) y 47 368 bytes de RAM global (14 %). Robot: 898 387 bytes de programa (68 %) y 45 716 bytes de RAM global (13 %). Ambos terminan con salida 0 y advierten que usan la configuración de ejemplo. Pasan los 7 grupos de simulaciones y la comprobación de igualdad de cabeceras.
+
+No se hicieron pruebas físicas. Quedan pendientes las pruebas manuales anteriores, especialmente compatibilidad física del LCD, latencia real, calibración de cada joystick, frenado y comportamiento eléctrico.
 
 ## Mejoras Futuras
 

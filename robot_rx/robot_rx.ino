@@ -4,12 +4,12 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-#include "../soccer_protocol.h"
+#include "soccer_protocol.h"
 
 #if __has_include("team_config.h")
 #include "team_config.h"
 #else
-#include "../team_config.h.example"
+#include "team_config.example.h"
 #warning "Compilando con configuracion de ejemplo; el robot no se habilitara hasta crear robot_rx/team_config.h."
 #endif
 

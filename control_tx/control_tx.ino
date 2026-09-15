@@ -7,13 +7,13 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-#include "../soccer_protocol.h"
-#include "../esp_now_compat.h"
+#include "soccer_protocol.h"
+#include "esp_now_compat.h"
 
 #if __has_include("team_config.h")
 #include "team_config.h"
 #else
-#include "../team_config.h.example"
+#include "team_config.example.h"
 #warning "Compilando con configuracion de ejemplo; el control no se habilitara hasta crear control_tx/team_config.h."
 #endif
 
