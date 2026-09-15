@@ -247,6 +247,18 @@ esp-now-soccer-bots/
 
 Cada carpeta de sketch contiene las cabeceras propias del proyecto que necesita y puede copiarse por separado. Las bibliotecas Arduino/ESP32 y `LiquidCrystal I2C` se instalan en el entorno. Al cambiar `soccer_protocol.h` o `team_config.example.h`, actualizar ambas copias; `node tests/simulate_safety.cjs` verifica que coincidan.
 
+### Que archivos `.h` se modifican
+
+| Archivo | ¿Modificar para cada equipo? | Uso |
+| :--- | :---: | :--- |
+| `control_tx/team_config.h` | Sí | Selecciona el par del control y contiene las MAC, PMK, LMK y canal Wi-Fi. Se crea desde `control_tx/team_config.example.h`. |
+| `robot_rx/team_config.h` | Sí | Selecciona el par del robot y debe contener los mismos datos del par que el control correspondiente. Se crea desde `robot_rx/team_config.example.h`. |
+| `control_tx/soccer_protocol.h` | No | Formato compartido de comandos, estados y CRC. |
+| `robot_rx/soccer_protocol.h` | No | Debe permanecer idéntico al archivo del control. |
+| `control_tx/esp_now_compat.h` | No | Selecciona automáticamente la firma ESP-NOW según la versión de ESP-IDF. |
+
+`LiquidCrystal_I2C.h`, `WiFi.h`, `Preferences.h`, `Wire.h` y las cabeceras `esp_*.h` pertenecen a bibliotecas instaladas; no se copian ni se modifican dentro del proyecto.
+
 ## Configuracion Inicial
 
 ### Paso 1: Obtener MACs
@@ -265,25 +277,51 @@ Ejecutar 6 veces (3 PMK + 3 LMK). Cada par debe tener claves distintas.
 
 ### Paso 3: Configurar team_config.h
 
-Dentro de cada carpeta `control_tx/` y `robot_rx/`, copiar su `team_config.example.h` local a `team_config.h`. Rellenar con:
-- Las 6 MACs reales obtenidas en paso 1.
-- Las 6 claves generadas en paso 2.
-- Canal WiFi deseado (default: 1). Canales recomendados si hay interferencia: 1, 6 u 11.
+Dentro de cada carpeta, crear la cabecera privada copiando la plantilla local:
+
+```powershell
+Copy-Item control_tx/team_config.example.h control_tx/team_config.h
+Copy-Item robot_rx/team_config.example.h robot_rx/team_config.h
+```
+
+Los números siguientes corresponden a las líneas actuales de ambas plantillas `team_config.example.h` y, recién copiadas, de `team_config.h`:
+
+| Línea(s) | Campo | Qué escribir |
+| :---: | :--- | :--- |
+| 9 | `PAIR_ID` | `1`, `2` o `3`, según el control o robot que se va a compilar. |
+| 19 | `WIFI_CHANNEL` | El mismo canal en los dos dispositivos del par. Usar un valor válido para la regulación local; normalmente 1, 6 u 11. |
+| 20 | `TEAM_PAIR_COUNT` | Dejar en `3` mientras existan los tres pares definidos. |
+
+Cada entrada de `TEAM_PAIRS` tiene siempre este orden: MAC del control, MAC del robot, PMK de 16 bytes y LMK de 16 bytes. Editar el bloque que corresponde al `PAIR_ID` seleccionado:
+
+| Par | MAC control | MAC robot | PMK | LMK |
+| :---: | :---: | :---: | :---: | :---: |
+| 1 | línea 25 | línea 26 | líneas 27–28 | líneas 29–30 |
+| 2 | línea 33 | línea 34 | líneas 35–36 | líneas 37–38 |
+| 3 | línea 41 | línea 42 | líneas 43–44 | líneas 45–46 |
+
+Por ejemplo, la MAC `AA:BB:CC:DD:EE:FF` se escribe como `{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}`. Una PMK o LMK debe contener exactamente 16 valores `0xNN`.
+
+Para cada pareja, copiar exactamente el mismo bloque del par y el mismo `WIFI_CHANNEL` en `control_tx/team_config.h` y `robot_rx/team_config.h`. En ambos archivos, la línea 9 también debe tener el mismo `PAIR_ID`. Solo cambia el firmware que se compila: `control_tx.ino` para el mando y `robot_rx.ino` para el robot.
+
+Si se prepara únicamente un par, los bloques no seleccionados pueden conservar valores provisionales porque el firmware accede al bloque indicado por `PAIR_ID`. Nunca cargar un dispositivo mientras su bloque seleccionado conserve las MAC o claves públicas de ejemplo.
 
 Las copias contienen secretos y estan excluidas por `.gitignore`. La plantilla versionada usa MAC y claves publicas de ejemplo; no proporcionan seguridad.
 
 ### Paso 4: Asignar PAIR_ID
 
-En cada sketch, definir el identificador de par antes de compilar:
+`PAIR_ID` se configura ahora en la línea 9 de cada `team_config.h`; no es necesario editar los `.ino`. Antes de compilar cada dispositivo, comprobar esta correspondencia:
 
-| Dispositivo | PAIR_ID | Archivo |
-| :--- | :--- | :--- |
-| Control 1 | 1 | control_tx/control_tx.ino |
-| Robot 1 | 1 | robot_rx/robot_rx.ino |
-| Control 2 | 2 | control_tx/control_tx.ino |
-| Robot 2 | 2 | robot_rx/robot_rx.ino |
-| Control 3 | 3 | control_tx/control_tx.ino |
-| Robot 3 | 3 | robot_rx/robot_rx.ino |
+| Dispositivo | `PAIR_ID` | Cabecera que se edita | Sketch que se compila |
+| :--- | :---: | :--- | :--- |
+| Control 1 | 1 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 1 | 1 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+| Control 2 | 2 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 2 | 2 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+| Control 3 | 3 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 3 | 3 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+
+Los `#define PAIR_ID 1` de respaldo presentes en `control_tx.ino` (línea 22) y `robot_rx.ino` (línea 18) solo permiten compilar con la plantilla de ejemplo o con una configuración antigua. El valor de `team_config.h` se incluye primero y tiene prioridad.
 
 ### Paso 5: Verificar hardware critico
 

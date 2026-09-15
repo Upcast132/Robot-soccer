@@ -17,7 +17,7 @@
 #warning "Compilando con configuracion de ejemplo; el control no se habilitara hasta crear control_tx/team_config.h."
 #endif
 
-// Compile each controller with its matching value: 1, 2, or 3.
+// Normally selected in team_config.h; the default keeps example builds working.
 #ifndef PAIR_ID
 #define PAIR_ID 1
 #endif
