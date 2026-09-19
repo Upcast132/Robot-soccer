@@ -10,9 +10,9 @@ Sistema de control remoto seguro para robots de fútbol basado en ESP32 y protoc
 
 ## Estado de esta revisión
 
-Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Compatibilidad prevista con Arduino-ESP32 3.x; **no se compiló, no se instaló un entorno y no se probó ni cargó firmware en hardware** en esta revisión.
+Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Control y robot compilan con Arduino CLI 1.5.2-rc.1, Arduino-ESP32 3.3.11 y FQBN `esp32:esp32:esp32`, usando las cabeceras locales y `PAIR_ID=1`. **No se probó ni cargó firmware en hardware**.
 
-Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. Esta revisión de cabeceras no demuestra que los sketches compilen.
+Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `control_tx/esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. La compilación comprobada con 3.3.11 no valida todas las versiones del núcleo.
 
 ## Protocolo y seguridad
 
@@ -216,7 +216,7 @@ Advertencias criticas del robot:
 
 Ademas del core Arduino-ESP32, el control necesita:
 
-- **LiquidCrystal_I2C** (por Frank de Brabander o equivalente): Arduino IDE → Library Manager → buscar "LiquidCrystal I2C" → instalar.
+- **LiquidCrystal I2C 1.1.2** (Frank de Brabander): versión usada para comprobar la compilación. Instalar con `arduino-cli lib install "LiquidCrystal I2C@1.1.2"`. Emite advertencias de arquitectura AVR y constantes obsoletas; compila con ESP32 3.3.11, pero queda pendiente probar el LCD físico.
 
 La direccion I2C del backpack varia segun el chip: el firmware prueba automaticamente `0x27` y luego `0x3F` al arrancar. Si tu backpack usa otra direccion, corre un sketch escaner I2C estandar para encontrarla y agregala en `initializeLcd()`.
 
@@ -226,22 +226,38 @@ El robot no necesita librerias nuevas; el LED RGB usa `digitalWrite()` estandar.
 
 ```text
 esp-now-soccer-bots/
-├── soccer_protocol.h       # Comandos v2, estados y CRC compartidos
-├── esp_now_compat.h        # Firma de envío según ESP-IDF
 ├── tests/simulate_safety.cjs # Simulaciones lógicas con Node.js, sin compilar
 ├── control_tx/
 │   ├── control_tx.ino       # Firmware transmisor: NVS, LED RGB, LCD I2C
+│   ├── soccer_protocol.h   # Comandos v2, estados y CRC
+│   ├── esp_now_compat.h    # Firma de envío según ESP-IDF
+│   ├── team_config.example.h # Plantilla pública de configuración
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
 ├── robot_rx/
 │   ├── robot_rx.ino         # Firmware receptor: anti-replay, LED RGB
+│   ├── soccer_protocol.h   # Misma definición de protocolo que el control
+│   ├── team_config.example.h # Misma plantilla pública que el control
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
 ├── get_mac/
 │   └── get_mac.ino          # Utilidad para leer MAC de cada ESP32
-├── team_config.h.example    # Plantilla segura para versionar
 ├── .gitignore               # Excluye team_config.h real
 ├── LICENSE                  # MIT License
 └── README.md                # Este archivo
 ```
+
+Cada carpeta de sketch contiene las cabeceras propias del proyecto que necesita y puede copiarse por separado. Las bibliotecas Arduino/ESP32 y `LiquidCrystal I2C` se instalan en el entorno. Al cambiar `soccer_protocol.h` o `team_config.example.h`, actualizar ambas copias; `node tests/simulate_safety.cjs` verifica que coincidan.
+
+### Que archivos `.h` se modifican
+
+| Archivo | ¿Modificar para cada equipo? | Uso |
+| :--- | :---: | :--- |
+| `control_tx/team_config.h` | Sí | Selecciona el par del control y contiene las MAC, PMK, LMK y canal Wi-Fi. Se crea desde `control_tx/team_config.example.h`. |
+| `robot_rx/team_config.h` | Sí | Selecciona el par del robot y debe contener los mismos datos del par que el control correspondiente. Se crea desde `robot_rx/team_config.example.h`. |
+| `control_tx/soccer_protocol.h` | No | Formato compartido de comandos, estados y CRC. |
+| `robot_rx/soccer_protocol.h` | No | Debe permanecer idéntico al archivo del control. |
+| `control_tx/esp_now_compat.h` | No | Selecciona automáticamente la firma ESP-NOW según la versión de ESP-IDF. |
+
+`LiquidCrystal_I2C.h`, `WiFi.h`, `Preferences.h`, `Wire.h` y las cabeceras `esp_*.h` pertenecen a bibliotecas instaladas; no se copian ni se modifican dentro del proyecto.
 
 ## Configuracion Inicial
 
@@ -261,25 +277,51 @@ Ejecutar 6 veces (3 PMK + 3 LMK). Cada par debe tener claves distintas.
 
 ### Paso 3: Configurar team_config.h
 
-Copiar `team_config.h.example` a `team_config.h` dentro de las carpetas `control_tx/` y `robot_rx/`. Rellenar con:
-- Las 6 MACs reales obtenidas en paso 1.
-- Las 6 claves generadas en paso 2.
-- Canal WiFi deseado (default: 1). Canales recomendados si hay interferencia: 1, 6 u 11.
+Dentro de cada carpeta, crear la cabecera privada copiando la plantilla local:
+
+```powershell
+Copy-Item control_tx/team_config.example.h control_tx/team_config.h
+Copy-Item robot_rx/team_config.example.h robot_rx/team_config.h
+```
+
+Los números siguientes corresponden a las líneas actuales de ambas plantillas `team_config.example.h` y, recién copiadas, de `team_config.h`:
+
+| Línea(s) | Campo | Qué escribir |
+| :---: | :--- | :--- |
+| 9 | `PAIR_ID` | `1`, `2` o `3`, según el control o robot que se va a compilar. |
+| 19 | `WIFI_CHANNEL` | El mismo canal en los dos dispositivos del par. Usar un valor válido para la regulación local; normalmente 1, 6 u 11. |
+| 20 | `TEAM_PAIR_COUNT` | Dejar en `3` mientras existan los tres pares definidos. |
+
+Cada entrada de `TEAM_PAIRS` tiene siempre este orden: MAC del control, MAC del robot, PMK de 16 bytes y LMK de 16 bytes. Editar el bloque que corresponde al `PAIR_ID` seleccionado:
+
+| Par | MAC control | MAC robot | PMK | LMK |
+| :---: | :---: | :---: | :---: | :---: |
+| 1 | línea 25 | línea 26 | líneas 27–28 | líneas 29–30 |
+| 2 | línea 33 | línea 34 | líneas 35–36 | líneas 37–38 |
+| 3 | línea 41 | línea 42 | líneas 43–44 | líneas 45–46 |
+
+Por ejemplo, la MAC `AA:BB:CC:DD:EE:FF` se escribe como `{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}`. Una PMK o LMK debe contener exactamente 16 valores `0xNN`.
+
+Para cada pareja, copiar exactamente el mismo bloque del par y el mismo `WIFI_CHANNEL` en `control_tx/team_config.h` y `robot_rx/team_config.h`. En ambos archivos, la línea 9 también debe tener el mismo `PAIR_ID`. Solo cambia el firmware que se compila: `control_tx.ino` para el mando y `robot_rx.ino` para el robot.
+
+Si se prepara únicamente un par, los bloques no seleccionados pueden conservar valores provisionales porque el firmware accede al bloque indicado por `PAIR_ID`. Nunca cargar un dispositivo mientras su bloque seleccionado conserve las MAC o claves públicas de ejemplo.
 
 Las copias contienen secretos y estan excluidas por `.gitignore`. La plantilla versionada usa MAC y claves publicas de ejemplo; no proporcionan seguridad.
 
 ### Paso 4: Asignar PAIR_ID
 
-En cada sketch, definir el identificador de par antes de compilar:
+`PAIR_ID` se configura ahora en la línea 9 de cada `team_config.h`; no es necesario editar los `.ino`. Antes de compilar cada dispositivo, comprobar esta correspondencia:
 
-| Dispositivo | PAIR_ID | Archivo |
-| :--- | :--- | :--- |
-| Control 1 | 1 | control_tx/control_tx.ino |
-| Robot 1 | 1 | robot_rx/robot_rx.ino |
-| Control 2 | 2 | control_tx/control_tx.ino |
-| Robot 2 | 2 | robot_rx/robot_rx.ino |
-| Control 3 | 3 | control_tx/control_tx.ino |
-| Robot 3 | 3 | robot_rx/robot_rx.ino |
+| Dispositivo | `PAIR_ID` | Cabecera que se edita | Sketch que se compila |
+| :--- | :---: | :--- | :--- |
+| Control 1 | 1 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 1 | 1 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+| Control 2 | 2 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 2 | 2 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+| Control 3 | 3 | `control_tx/team_config.h` | `control_tx/control_tx.ino` |
+| Robot 3 | 3 | `robot_rx/team_config.h` | `robot_rx/robot_rx.ino` |
+
+Los `#define PAIR_ID 1` de respaldo presentes en `control_tx.ino` (línea 22) y `robot_rx.ino` (línea 18) solo permiten compilar con la plantilla de ejemplo o con una configuración antigua. El valor de `team_config.h` se incluye primero y tiene prioridad.
 
 ### Paso 5: Verificar hardware critico
 
@@ -371,13 +413,23 @@ Encender los 3 controles y 3 robots, calibrar y armar cada par en el mismo espac
 - [ ] LCD de cada control muestra el PAIR_ID correcto y responde a cambios de estado.
 - [ ] Backpack de cada LCD confirmado a 3.3V, no a 5V.
 
-## Verificación realizada sin compilar
+## Verificación realizada
 
 Se revisaron las rutas de calibración, validación, armado, parada, failsafe, acceso compartido, respuesta de estado y error fatal. Se comprobaron diferencias y espacios con `git diff --check`.
 
 La simulación reproducible `node tests/simulate_safety.cjs` usa únicamente Node.js, sin dependencias nuevas. Comprueba modelos de secuencias/reserva NVS con reinicios y desbordamiento, armado y cancelación, confirmaciones, límites de calibración y rampas con inversión y parada. Lee los parámetros del código para detectar diferencias de configuración. **Son simulaciones de lógica, no ejecución ni pruebas del firmware C++**, y no modelan Wi-Fi, FreeRTOS, ADC, NVS física o el puente H.
 
-No se compiló ni se hicieron pruebas físicas. Quedan pendientes las pruebas manuales anteriores, especialmente compatibilidad completa de librerías, latencia real, calibración de cada joystick, frenado y comportamiento eléctrico.
+El 15 de septiembre de 2026 se compilaron y enlazaron control y robot con las cabeceras locales, Arduino-ESP32 3.3.11 y `PAIR_ID=1`. Desde la raíz del repositorio:
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all --build-path build/control_tx control_tx
+arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all --build-path build/robot_rx robot_rx
+node tests/simulate_safety.cjs
+```
+
+Control: 922 472 bytes de programa (70 %) y 47 368 bytes de RAM global (14 %). Robot: 898 387 bytes de programa (68 %) y 45 716 bytes de RAM global (13 %). Ambos terminan con salida 0 y advierten que usan la configuración de ejemplo. Pasan los 7 grupos de simulaciones y la comprobación de igualdad de cabeceras.
+
+No se hicieron pruebas físicas. Quedan pendientes las pruebas manuales anteriores, especialmente compatibilidad física del LCD, latencia real, calibración de cada joystick, frenado y comportamiento eléctrico.
 
 ## Mejoras Futuras
 

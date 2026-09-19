@@ -4,16 +4,16 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-#include "../soccer_protocol.h"
+#include "soccer_protocol.h"
 
 #if __has_include("team_config.h")
 #include "team_config.h"
 #else
-#include "../team_config.h.example"
+#include "team_config.example.h"
 #warning "Compilando con configuracion de ejemplo; el robot no se habilitara hasta crear robot_rx/team_config.h."
 #endif
 
-// Compile each robot with its matching value: 1, 2, or 3.
+// Normally selected in team_config.h; the default keeps example builds working.
 #ifndef PAIR_ID
 #define PAIR_ID 1
 #endif

@@ -6,7 +6,13 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const tx = fs.readFileSync(path.join(root, 'control_tx/control_tx.ino'), 'utf8');
 const rx = fs.readFileSync(path.join(root, 'robot_rx/robot_rx.ino'), 'utf8');
-const protocol = fs.readFileSync(path.join(root, 'soccer_protocol.h'), 'utf8');
+const protocol = fs.readFileSync(path.join(root, 'control_tx/soccer_protocol.h'), 'utf8');
+for (const header of ['soccer_protocol.h', 'team_config.example.h']) {
+  const controlHeader = fs.readFileSync(path.join(root, 'control_tx', header), 'utf8');
+  const robotHeader = fs.readFileSync(path.join(root, 'robot_rx', header), 'utf8');
+  assert.equal(controlHeader.replace(/\r\n/g, '\n'), robotHeader.replace(/\r\n/g, '\n'),
+    `${header} must stay identical in both sketch folders`);
+}
 function constant(source, name) {
   const match = source.match(new RegExp(`constexpr \\w+ ${name} = (\\d+);`));
   assert.ok(match, `Missing decimal constant ${name}`);
