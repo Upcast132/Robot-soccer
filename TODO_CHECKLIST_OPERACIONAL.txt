@@ -108,5 +108,6 @@ CONTROL CYD (control_cyd, ESP32-2432S024R) — TODO PENDIENTE
 [ ] Botón ARMAR/FRENO y gesto de armado con robot real, ruedas levantadas.
 [ ] Medir que el dibujo no introduce jitter en los 50 Hz de envío.
 [ ] LED verde de la CYD al enviar acciones: comprobar a simple vista con robot Desarmado y Armado.
-[ ] LED integrado del robot (GPIO2): comprobar que pulsa con cada comando y se apaga sin enlace.
-[ ] Failsafe del par 3: apagar el robot y comprobar que la CYD pasa a Sin senal (rojo).
+[~] LED integrado del robot (GPIO2): visto encendido con enlace en fotos del usuario; falta confirmar que se apaga sin enlace.
+[~] Failsafe del par 3: foto con "Sin senal" (rojo) en la CYD; falta repetirlo de forma controlada y comprobar el freno con motores.
+[ ] MOVIMIENTO REAL con motores (robot 3 sin L298N todavía): probar con ruedas levantadas.
