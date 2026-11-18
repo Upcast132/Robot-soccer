@@ -7,12 +7,19 @@ const root = path.join(__dirname, '..');
 const tx = fs.readFileSync(path.join(root, 'control_tx/control_tx.ino'), 'utf8');
 const rx = fs.readFileSync(path.join(root, 'robot_rx/robot_rx.ino'), 'utf8');
 const protocol = fs.readFileSync(path.join(root, 'control_tx/soccer_protocol.h'), 'utf8');
+const cyd = fs.readFileSync(path.join(root, 'control_cyd/control_cyd.ino'), 'utf8');
 for (const header of ['soccer_protocol.h', 'team_config.example.h']) {
   const controlHeader = fs.readFileSync(path.join(root, 'control_tx', header), 'utf8');
-  const robotHeader = fs.readFileSync(path.join(root, 'robot_rx', header), 'utf8');
-  assert.equal(controlHeader.replace(/\r\n/g, '\n'), robotHeader.replace(/\r\n/g, '\n'),
-    `${header} must stay identical in both sketch folders`);
+  for (const folder of ['robot_rx', 'control_cyd']) {
+    const other = fs.readFileSync(path.join(root, folder, header), 'utf8');
+    assert.equal(controlHeader.replace(/\r\n/g, '\n'), other.replace(/\r\n/g, '\n'),
+      `${header} must stay identical in control_tx and ${folder}`);
+  }
 }
+assert.equal(
+  fs.readFileSync(path.join(root, 'control_tx/esp_now_compat.h'), 'utf8').replace(/\r\n/g, '\n'),
+  fs.readFileSync(path.join(root, 'control_cyd/esp_now_compat.h'), 'utf8').replace(/\r\n/g, '\n'),
+  'esp_now_compat.h must stay identical in control_tx and control_cyd');
 function constant(source, name) {
   const match = source.match(new RegExp(`constexpr \\w+ ${name} = (\\d+);`));
   assert.ok(match, `Missing decimal constant ${name}`);
@@ -318,5 +325,55 @@ check('protocol v2 fixed sizes and CRC reference vector', () => {
     for (let bit = 0; bit < 8; ++bit) crc = ((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0)) & 0xffff;
   }
   assert.equal(crc, 0x29b1);
+});
+check('control_cyd shares timing constants and maps touch to the joystick range', () => {
+  for (const name of ['SEQUENCE_BLOCK_SIZE', 'STATUS_TIMEOUT_MS', 'SENT_HISTORY_SIZE',
+                      'JOYSTICK_DEADZONE', 'SEND_INTERVAL_US']) {
+    assert.equal(constant(cyd, name), constant(tx, name), `${name} differs from control_tx`);
+  }
+  const radius = constant(cyd, 'JOY_RADIUS');
+  const dead = constant(cyd, 'JOYSTICK_DEADZONE');
+  const axis = v => { const c = Math.max(-1000, Math.min(1000, v)); return Math.abs(c) < dead ? 0 : c; };
+  // Model of sampleInput(): clamp to the circle, scale, deadzone. No touch = neutral.
+  const map = (dx, dy) => {
+    const dist = Math.hypot(dx, dy);
+    if (dist > radius) { dx = Math.trunc(dx * radius / dist); dy = Math.trunc(dy * radius / dist); }
+    return { steering: axis(Math.trunc(dx * 1000 / radius)), throttle: axis(Math.trunc(-dy * 1000 / radius)) };
+  };
+  assert.deepEqual(map(0, 0), { steering: 0, throttle: 0 });
+  assert.equal(map(radius, 0).steering, 1000);
+  assert.equal(map(0, -radius).throttle, 1000);   // up = forward
+  assert.equal(map(0, radius).throttle, -1000);
+  assert.equal(map(radius * 5, 0).steering, 1000); // dragging outside stays clamped
+  const diagonal = map(radius * 3, radius * 3);
+  assert.ok(Math.abs(diagonal.steering) <= 1000 && Math.abs(diagonal.throttle) <= 1000);
+  assert.equal(map(Math.floor(radius * 0.04), 0).steering, 0); // inside the deadzone
+  for (let dx = -3 * radius; dx <= 3 * radius; dx += 3)
+    for (let dy = -3 * radius; dy <= 3 * radius; dy += 3) {
+      const m = map(dx, dy);
+      assert.ok(Math.abs(m.steering) <= 1000 && Math.abs(m.throttle) <= 1000);
+    }
+  assert.ok(constant(cyd, 'TOUCH_CONFIRM_SAMPLES') >= 2, 'touch must be confirmed on consecutive samples');
+  assert.match(cyd, /if \(!readTouch\(x, y\)\) \{[\s\S]*?input = \{0, 0, false\};[\s\S]*?return;/,
+    'lifting the finger must immediately produce neutral axes and no button');
+});
+check('robot receive LED pulses once per command and ends before the next one', () => {
+  const pulse = constant(rx, 'RX_LED_PULSE_MS');
+  const period = constant(tx, 'SEND_INTERVAL_US') / 1000;
+  assert.ok(pulse > 0 && pulse < period, 'pulse must end before the next 50 Hz command');
+  assert.match(rx, /\+\+acceptedPacketCount;\s*portEXIT_CRITICAL\(&commandMux\);\s*\}/,
+    'the counter is incremented under commandMux in the receive callback');
+  const callback = rx.slice(rx.indexOf('void onDataReceived'), rx.indexOf('[[noreturn]] void fatalError'));
+  assert.ok(!/digitalWrite|Serial/.test(callback), 'no GPIO or Serial inside the ESP-NOW callback');
+  // Model: one pulse per distinct count; pulse frequency equals the packet rate.
+  for (const hz of [10, 25, 50]) {
+    const gap = 1000 / hz;
+    let pulses = 0, lastCount = 0;
+    for (let t = 0, count = 0; t < 1000; ++t) {
+      if (t % gap === 0) ++count;
+      if (count !== lastCount) { lastCount = count; ++pulses; }
+    }
+    assert.equal(pulses, hz);
+  }
 });
 console.log(`${groups} logical simulation groups passed; firmware compilation and hardware tests remain pending.`);

@@ -51,6 +51,10 @@ El failsafe se atiende en la siguiente iteración después de superar 300 ms; no
 | Rojo sólido | **Sin senal**, más de 300 ms sin una confirmación nueva tras haber recibido alguna | Más de 300 ms sin comando nuevo tras haberse conectado |
 | Rojo intermitente rápido | **ERROR FATAL** | Error fatal con freno aplicado |
 
+**LED al enviar acciones (`control_cyd`):** mientras el usuario envía una acción (joystick fuera del centro o botón ARMAR/FRENO pulsado) y el robot confirma el enlace (Desarmado o Armado), el LED RGB integrado de la CYD se pone **verde**. Sin acción, vuelve al color del estado de la tabla anterior. Con "Sin senal" o "Esperando robot" no se fuerza el verde, para no ocultar una pérdida de enlace. El panel de la pantalla siempre muestra el estado real.
+
+**LED de recepción en el robot (`robot_rx`):** el LED integrado de la placa (GPIO2, activo en alto) da **un pulso de 8 ms por cada comando válido aceptado**, así que parpadea a la frecuencia de recepción: a 50 Hz es una luz tenue casi continua, y si el enlace se degrada se nota más tenue o intermitente; sin comandos queda apagado. El pulso se genera en `loop()`; el callback ESP-NOW solo incrementa un contador bajo `commandMux`. GPIO2 no lo usa el L298N ni el LED RGB del robot. La constante `RX_LED_PULSE_MS` debe mantenerse por debajo del periodo de 20 ms de los comandos (la simulación lo comprueba).
+
 El éxito del callback de envío queda como diagnóstico de radio; no habilita el verde. Al arrancar con el robot apagado el LCD permanece en **Esperando robot**, aunque la radio local esté lista. La confirmación puede demorarse respecto al estado local del robot; una pérdida solo en el retorno puede mostrar rojo en el control mientras el robot todavía recibe comandos.
 
 El LCD conserva `Control PAIR X` en la primera fila. La segunda muestra los mensajes de calibración y enlace anteriores; se refresca cada 300 ms o al detectar un cambio. Si no hay LCD, seguir las indicaciones por Serial.
@@ -62,6 +66,10 @@ El LCD conserva `Control PAIR X` en la primera fila. La segunda muestra los mens
 La mezcla diferencial mantiene la reescala proporcional a ±1000. Cada motor cambia como máximo **40 unidades de mando cada 10 ms**. Para invertir, baja hasta cero y permanece allí **20 ms** antes de aplicar el sentido contrario. La pausa también se conserva si el objetivo cambia mientras está a cero. No se acumulan pasos para ejecutarlos de golpe tras una demora.
 
 El botón, el failsafe y un error fatal del robot omiten la rampa: frenan y borran objetivos y progreso pendientes. Se mantienen PWM a 5 kHz y 8 bits, mínimo 60 y máximo 200 de 255 en movimiento; cero aplica el frenado activo existente. La rampa limita el mando, no garantiza una variación uniforme del par: el primer mando distinto de cero aún aplica el PWM mínimo. La respuesta eléctrica y mecánica debe medirse.
+
+### Herramienta de diagnóstico: `tools/cyd_probe`
+
+Sketch de sondeo para la CYD, **no** forma parte del firmware del robot. Muestra la MAC, hace un escaneo I2C y lee crudos el táctil capacitivo (CST820) y el resistivo (XPT2046) probando dos cableados (pines propios 25/32/39 o bus compartido con la pantalla 14/13/12, ambos con CS 33). Así se descubrió que esta CYD usa el XPT2046 en el bus de la pantalla. Compilar y cargar con `arduino-cli compile/upload --fqbn esp32:esp32:esp32 tools/cyd_probe`. Antes de reemplazar el firmware de una CYD que ya se usa, conviene guardar su flash completa: `esptool --port <puerto> --baud 921600 read-flash 0 0x400000 copia.bin`.
 
 ## Diagramas de Conexion
 
@@ -222,6 +230,18 @@ La direccion I2C del backpack varia segun el chip: el firmware prueba automatica
 
 El robot no necesita librerias nuevas; el LED RGB usa `digitalWrite()` estandar.
 
+## Control alternativo en CYD (ESP32-2432S024R)
+
+`control_cyd/` reemplaza el joystick KY-023, el botón, el LED RGB externo y el LCD 16x2 por la pantalla táctil resistiva de la Cheap Yellow Display. Usa el **mismo protocolo v2, el mismo bloque NVS `soccer_tx/next_seq` y la misma lógica de confirmación** que `control_tx`; el robot no cambia. Requiere la biblioteca **LovyanGFX** (`arduino-cli lib install LovyanGFX`) y su propio `control_cyd/team_config.h` con la MAC real de la CYD como `controlMac` del par.
+
+**Estado: compila y el par 3 se probó el 18 de noviembre de 2026 con una CYD y un ESP32 desnudo como robot (sin motores ni L298N): calibración táctil, "Toca para iniciar", enlace ESP-NOW cifrado y estados Esperando robot → Desarmado → Armado coincidieron en ambos Serial. Sin probar aún: failsafe y pérdida de señal en este par, movimiento real con motores, latencia y jitter de los 50 Hz con el dibujo.** Con `tools/cyd_probe` se verificó en la placa: pantalla ILI9341 (SCLK 14, MOSI 13, MISO 12, CS 15, DC 2, luz 27, `invert=false`, `rgb_order=false`), **táctil XPT2046 en el mismo bus SPI que la pantalla** (CS 33, IRQ 36; no en 25/32/39) y LED RGB activo en bajo (4/16/17). No hay CST820. La MAC se lee con el mismo sondeo.
+
+- **Joystick virtual** (círculo a la izquierda): el desplazamiento del dedo se limita al círculo y se escala a ±1000 con la misma zona muerta de 50; arriba es avance. **Sin contacto = neutral** inmediato. Un toque solo cuenta si empieza dentro de una zona y se confirma en 2 muestras consecutivas.
+- **Botón ARMAR / FRENO** (derecha): equivale al botón del joystick. El gesto de armado y el freno son los de la sección anterior.
+- **El táctil resistivo es monotáctil**: no se puede mover el joystick y pulsar el botón a la vez. Es compatible con el protocolo (el armado exige ejes en neutral y el freno ocurre con los ejes ya en 0).
+- **Inicio**: calibración táctil (se guarda en NVS, espacio `cyd_ui`; mantener tocada la pantalla al arrancar para repetirla), luego "Toca para iniciar" y liberación estable de 30 ms antes de activar la radio. Esa pulsación no cuenta para armar.
+- **Estado**: panel de color con los mismos cuatro estados que el control original y LED RGB integrado como indicador redundante; rojo con "ERROR FATAL" ante un fallo fatal.
+
 ## Estructura del Repositorio
 
 ```text
@@ -232,6 +252,10 @@ esp-now-soccer-bots/
 │   ├── soccer_protocol.h   # Comandos v2, estados y CRC
 │   ├── esp_now_compat.h    # Firma de envío según ESP-IDF
 │   ├── team_config.example.h # Plantilla pública de configuración
+│   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
+├── control_cyd/
+│   ├── control_cyd.ino      # Control alternativo para CYD ESP32-2432S024R (táctil)
+│   ├── soccer_protocol.h, esp_now_compat.h, team_config.example.h # Copias idénticas a control_tx
 │   └── team_config.h        # NO SUBIR: contiene claves y MACs reales
 ├── robot_rx/
 │   ├── robot_rx.ino         # Firmware receptor: anti-replay, LED RGB
@@ -245,7 +269,7 @@ esp-now-soccer-bots/
 └── README.md                # Este archivo
 ```
 
-Cada carpeta de sketch contiene las cabeceras propias del proyecto que necesita y puede copiarse por separado. Las bibliotecas Arduino/ESP32 y `LiquidCrystal I2C` se instalan en el entorno. Al cambiar `soccer_protocol.h` o `team_config.example.h`, actualizar ambas copias; `node tests/simulate_safety.cjs` verifica que coincidan.
+Cada carpeta de sketch contiene las cabeceras propias del proyecto que necesita y puede copiarse por separado. Las bibliotecas Arduino/ESP32 y `LiquidCrystal I2C` se instalan en el entorno. Al cambiar `soccer_protocol.h`, `team_config.example.h` o `esp_now_compat.h`, actualizar todas las copias (`control_tx`, `control_cyd` y, salvo la última, `robot_rx`); `node tests/simulate_safety.cjs` verifica que coincidan.
 
 ### Que archivos `.h` se modifican
 

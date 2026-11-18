@@ -34,6 +34,11 @@ constexpr uint8_t PIN_LED_R = 17;
 constexpr uint8_t PIN_LED_G = 16;
 constexpr uint8_t PIN_LED_B = 4;
 
+// Board LED (GPIO2 on most ESP32 DevKit boards). It pulses once per accepted
+// command, so its blink rate equals the rate at which commands are received.
+constexpr uint8_t PIN_RX_LED = 2;
+constexpr uint32_t RX_LED_PULSE_MS = 8;  // Must stay below the 20 ms command period.
+
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t FAILSAFE_TIMEOUT_MS = 300;
 constexpr uint32_t PWM_FREQUENCY_HZ = 5000;
@@ -59,6 +64,7 @@ RemoteMsg latestMessage = {};
 uint32_t latestPacketAtMs = 0;
 uint32_t lastAcceptedSequence = 0;
 bool hasAcceptedPacket = false;
+uint32_t acceptedPacketCount = 0;  // Incremented per accepted packet under commandMux.
 // Gesture and safety transitions are evaluated for EVERY accepted packet under
 // commandMux, so a short stop press cannot be overwritten by a later command.
 RobotState robotState = RobotState::WAITING;
@@ -308,6 +314,7 @@ void onDataReceived(const esp_now_recv_info_t *info,
   latestMessage = message;
   latestPacketAtMs = now;
   hasAcceptedPacket = true;
+  ++acceptedPacketCount;
   portEXIT_CRITICAL(&commandMux);
 }
 
@@ -406,6 +413,8 @@ void initializeRadio() {
 }
 
 void setup() {
+  pinMode(PIN_RX_LED, OUTPUT);
+  digitalWrite(PIN_RX_LED, LOW);
   pinMode(PIN_LED_R, OUTPUT);
   pinMode(PIN_LED_G, OUTPUT);
   pinMode(PIN_LED_B, OUTPUT);
@@ -457,7 +466,22 @@ void loop() {
   const uint32_t generation = stateGeneration;
   const bool mustBrake = brakePending;
   brakePending = false;
+  const uint32_t receivedCount = acceptedPacketCount;
   portEXIT_CRITICAL(&commandMux);
+
+  // One LED pulse per accepted command; GPIO work stays out of the callback.
+  static uint32_t lastSeenCount = 0;
+  static uint32_t rxLedOffAtMs = 0;
+  static bool rxLedOn = false;
+  if (receivedCount != lastSeenCount) {
+    lastSeenCount = receivedCount;
+    digitalWrite(PIN_RX_LED, HIGH);
+    rxLedOn = true;
+    rxLedOffAtMs = now + RX_LED_PULSE_MS;
+  } else if (rxLedOn && static_cast<int32_t>(now - rxLedOffAtMs) >= 0) {
+    digitalWrite(PIN_RX_LED, LOW);
+    rxLedOn = false;
+  }
 
   // Never perform GPIO/PWM, ESP-NOW sends or Serial work in the callback/lock.
   if (mustBrake || state != RobotState::ARMED || !linkIsFresh) {
