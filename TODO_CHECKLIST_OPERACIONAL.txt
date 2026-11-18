@@ -97,3 +97,17 @@ Corriente / tensión / temperatura / autonomía: ________________________
 Observaciones: _______________________________________________________
 Responsable: ______________________________  Fecha: ___________________
 [ ] Pruebas completadas y resultado revisado por el responsable del equipo.
+
+
+CONTROL CYD (control_cyd, ESP32-2432S024R) — TODO PENDIENTE
+[x] Compilar control_cyd con LovyanGFX (compila; flasheado y probado con robot 3 sin motores).
+[x] Pines TFT/táctil/LED confirmados con tools/cyd_probe (táctil XPT2046 en el bus del TFT).
+[x] control_cyd/team_config.h y robot_rx/team_config.h creados para el par 3 (no versionados).
+[ ] Calibración táctil guardada y repetible (mantener tocada la pantalla al arrancar).
+[ ] Soltar el dedo devuelve ejes a 0 de inmediato; sin transmisión antes de la liberación estable.
+[ ] Botón ARMAR/FRENO y gesto de armado con robot real, ruedas levantadas.
+[ ] Medir que el dibujo no introduce jitter en los 50 Hz de envío.
+[ ] LED verde de la CYD al enviar acciones: comprobar a simple vista con robot Desarmado y Armado.
+[~] LED integrado del robot (GPIO2): visto encendido con enlace en fotos del usuario; falta confirmar que se apaga sin enlace.
+[~] Failsafe del par 3: foto con "Sin senal" (rojo) en la CYD; falta repetirlo de forma controlada y comprobar el freno con motores.
+[ ] MOVIMIENTO REAL con motores (robot 3 sin L298N todavía): probar con ruedas levantadas.
