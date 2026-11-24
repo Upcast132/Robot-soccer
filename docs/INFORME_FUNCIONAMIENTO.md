@@ -10,15 +10,32 @@ Este informe explica cómo funciona el sistema de los tres robots de fútbol: qu
 
 El equipo tiene **3 pares** control/robot. Cada par es independiente: el control *n* solo habla con el robot *n*.
 
+```mermaid
+flowchart LR
+    subgraph CTRL["Control (ESP32)"]
+        IN["Joystick o táctil<br/>Botón ARMAR/FRENO"]
+        UI["LCD o pantalla<br/>LED RGB de estado"]
+    end
+    subgraph ROB["Robot (ESP32)"]
+        VAL["Valida el paquete"]
+        ARM["Gesto de armado<br/>Failsafe 300 ms"]
+        RAMP["Mezcla y rampa<br/>de motores"]
+        LED["LED RGB + LED GPIO2"]
+    end
+    DRV["Driver L298N"]
+    MOT["2 motorreductores<br/>TT amarillos"]
+
+    IN -- "RemoteMsg · 50 Hz<br/>ESP-NOW cifrado" --> VAL
+    VAL --> ARM --> RAMP --> DRV --> MOT
+    ARM --> LED
+    ARM -- "StatusMsg · cada 100 ms" --> UI
 ```
-  CONTROL (ESP32)                         ROBOT (ESP32)
- ┌──────────────────┐   RemoteMsg 50 Hz  ┌──────────────────┐
- │ Joystick / táctil │ ─────────────────► │ Valida paquete   │
- │ Botón ARMAR/FRENO │                    │ Gesto de armado  │
- │ LCD o pantalla    │ ◄───────────────── │ Failsafe 300 ms  │
- │ LED RGB de estado │   StatusMsg 10 Hz  │ Rampa de motores │──► L298N ──► 2 motorreductores
- └──────────────────┘                     │ LED RGB + GPIO2  │
-                                          └──────────────────┘
+
+```mermaid
+flowchart LR
+    C1["Control 1<br/>control_tx"] <-- "par 1" --> R1["Robot 1"]
+    C2["Control 2<br/>control_tx"] <-- "par 2" --> R2["Robot 2"]
+    C3["Control 3<br/>CYD táctil"] <-- "par 3" --> R3["Robot 3"]
 ```
 
 | Programa | Placa | Función |
@@ -71,18 +88,43 @@ Hay dos tipos de mensaje, ambos de tamaño fijo y con un CRC16 para detectar err
 
 El robot descarta el paquete (sin renovar el failsafe) si falla cualquiera de estas condiciones:
 
-1. Tamaño exacto de 18 bytes.
-2. Viene de la MAC de **su** control y va dirigido a **su** MAC.
-3. `magic`, versión y `pairId` correctos.
-4. Solo usa flags conocidos y los ejes están entre −1000 y 1000.
-5. El CRC coincide.
-6. El número de secuencia es **más nuevo** que el último aceptado.
+```mermaid
+flowchart TD
+    P(["Llega un paquete"]) --> A{"¿Mide 18 bytes?"}
+    A -- no --> X["Descartar"]
+    A -- sí --> B{"¿Viene de MI control<br/>y va a MI MAC?"}
+    B -- no --> X
+    B -- sí --> C{"¿magic, versión<br/>y PAIR_ID correctos?"}
+    C -- no --> X
+    C -- sí --> D{"¿Flags conocidos y ejes<br/>entre −1000 y 1000?"}
+    D -- no --> X
+    D -- sí --> E{"¿CRC correcto?"}
+    E -- no --> X
+    E -- sí --> F{"¿Secuencia más nueva<br/>que la última aceptada?"}
+    F -- no --> X
+    F -- sí --> OK["Aceptar: renovar failsafe,<br/>procesar armado o freno,<br/>pulso del LED GPIO2"]
+```
 
-El punto 6 es la protección **anti-replay**: un paquete grabado y reenviado más tarde se rechaza porque su número ya es viejo. Para que esto funcione aunque el control se reinicie, el control guarda en su memoria no volátil (NVS) el siguiente bloque de 10 000 números **antes** de usarlos. Por eso **nunca hay que borrar la NVS** para "arreglar" una conexión: se perdería esta garantía.
+El último paso es la protección **anti-replay**: un paquete grabado y reenviado más tarde se rechaza porque su número ya es viejo. Para que esto funcione aunque el control se reinicie, el control guarda en su memoria no volátil (NVS) el siguiente bloque de 10 000 números **antes** de usarlos. Por eso **nunca hay que borrar la NVS** para "arreglar" una conexión: se perdería esta garantía.
 
 ### 2.5 Cómo sabe el control que el robot está conectado
 
 El control **no** se fía de que el envío "salió bien" por radio. Solo muestra Desarmado o Armado cuando recibe un `StatusMsg` válido del robot que confirma uno de sus últimos 32 envíos, hecho hace como máximo 300 ms. Si deja de recibir estados durante más de 300 ms, muestra **Sin señal**.
+
+```mermaid
+sequenceDiagram
+    participant C as Control
+    participant R as Robot
+    loop cada 20 ms
+        C->>R: RemoteMsg (seq n, ejes, botón)
+    end
+    Note over R: valida y acepta seq n
+    R->>C: StatusMsg (estado, última seq aceptada = n)
+    Note over C: ¿n está entre mis últimos 32 envíos<br/>y lo envié hace ≤ 300 ms?
+    C->>C: Sí: mostrar Desarmado o Armado
+    Note over C,R: Si pasan > 300 ms sin StatusMsg válido
+    C->>C: mostrar "Sin senal" (rojo)
+```
 
 ---
 
@@ -90,14 +132,14 @@ El control **no** se fía de que el envío "salió bien" por radio. Solo muestra
 
 ### 3.1 Estados
 
-```
-             primer paquete válido
- ESPERANDO ─────────────────────────► DESARMADO
-     ▲                                  │   ▲
-     │ >300 ms sin                      │   │ botón pulsado
-     │ paquete válido      gesto de     │   │ (freno)
-     │ (failsafe)          armado       ▼   │
-     └──────────────────────────────── ARMADO
+```mermaid
+stateDiagram-v2
+    [*] --> ESPERANDO: encender
+    ESPERANDO --> DESARMADO: primer paquete válido
+    DESARMADO --> ARMADO: gesto de armado completo
+    ARMADO --> DESARMADO: botón pulsado (freno)
+    DESARMADO --> ESPERANDO: más de 300 ms sin paquete válido
+    ARMADO --> ESPERANDO: más de 300 ms sin paquete válido (failsafe)
 ```
 
 - **Esperando:** no recibe paquetes válidos. Motores frenados.
@@ -111,6 +153,21 @@ Para pasar de Desarmado a Armado hay que hacer, sin mover el joystick:
 1. Soltar el botón y dejar el joystick **en el centro durante 500 ms**.
 2. **Pulsar** el botón.
 3. **Soltarlo.** Al soltarlo, el robot queda Armado.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NECESITA_SOLTAR
+    NECESITA_SOLTAR --> NEUTRAL: botón suelto y joystick centrado
+    NEUTRAL --> LISTO: 500 ms en el centro
+    NEUTRAL --> NECESITA_SOLTAR: pulsar antes de 500 ms
+    LISTO --> PULSADO: pulsar botón
+    PULSADO --> ARMADO: soltar botón
+    ARMADO --> [*]
+    note right of NEUTRAL
+        Mover el joystick o perder la señal
+        en cualquier paso vuelve a NECESITA_SOLTAR
+    end note
+```
 
 Si durante el gesto se mueve el joystick, se pulsa antes de tiempo o se pierde la señal, el gesto se cancela y hay que empezar de nuevo. Esto evita que el robot arranque solo, por ejemplo al encender el control con el joystick inclinado.
 
@@ -126,6 +183,17 @@ El freno es **activo**: el L298N pone ambas salidas del motor a nivel bajo con e
 
 ### 3.4 Del joystick a los motores
 
+```mermaid
+flowchart LR
+    J["Ejes del paquete<br/>avance y giro<br/>−1000 … 1000"] --> DZ["Zona muerta<br/>menos de 50 → 0"]
+    DZ --> MIX["Mezcla diferencial<br/>izq = avance + giro<br/>der = avance − giro"]
+    MIX --> RS["Reescalar si<br/>pasa de 1000"]
+    RS --> RAMP["Rampa<br/>40 unidades cada 10 ms<br/>pausa 20 ms al invertir"]
+    RAMP --> PWM["PWM 5 kHz<br/>ciclo 60 … 200 de 255"]
+    PWM --> L298["L298N<br/>IN1/IN2 sentido<br/>ENA/ENB potencia"]
+    L298 --> M["Motores"]
+```
+
 1. **Zona muerta:** valores de eje menores que 50 (de 1000) se toman como cero, para que el robot no se arrastre con el joystick casi centrado.
 2. **Mezcla diferencial:** `izquierdo = avance + giro` y `derecho = avance − giro`. Si alguno pasa de 1000, ambos se reescalan en la misma proporción para mantener la dirección.
 3. **Rampa:** cada 10 ms cada motor cambia como máximo 40 unidades. De parado a máxima velocidad tarda unos **250 ms**. Esto reduce picos de corriente que podrían reiniciar el ESP32.
@@ -134,6 +202,42 @@ El freno es **activo**: el L298N pone ambas salidas del motor a nivel bajo con e
 6. Si un motor gira al revés por cómo se cableó, se corrige con `LEFT_MOTOR_REVERSED` o `RIGHT_MOTOR_REVERSED` sin recablear.
 
 ### 3.5 Pines del robot
+
+```mermaid
+flowchart LR
+    subgraph ESP["ESP32 del robot"]
+        G25["GPIO25"]
+        G26["GPIO26"]
+        G32["GPIO32 PWM"]
+        G27["GPIO27"]
+        G14["GPIO14"]
+        G33["GPIO33 PWM"]
+        G17["GPIO17"]
+        G16["GPIO16"]
+        G4["GPIO4"]
+        G2["GPIO2"]
+    end
+    subgraph DRV["L298N (sin jumpers ENA/ENB)"]
+        IN1["IN1"]
+        IN2["IN2"]
+        ENA["ENA"]
+        IN3["IN3"]
+        IN4["IN4"]
+        ENB["ENB"]
+    end
+    G25 --> IN1
+    G26 --> IN2
+    G32 --> ENA
+    G27 --> IN3
+    G14 --> IN4
+    G33 --> ENB
+    ENA --> MI["Motor izquierdo"]
+    ENB --> MD["Motor derecho"]
+    G17 --> LR["LED RGB: R"]
+    G16 --> LG["LED RGB: G"]
+    G4 --> LB["LED RGB: B"]
+    G2 --> LI["LED integrado"]
+```
 
 | Función | GPIO |
 | :--- | :--- |
@@ -167,6 +271,19 @@ El callback de ESP-NOW (lo que se ejecuta al llegar un paquete) solo **valida y 
 ## 4. Control con joystick (`control_tx`)
 
 ### 4.1 Arranque y calibración
+
+```mermaid
+flowchart TD
+    ON(["Encender"]) --> LCD["LCD: Control PAIR n<br/>Centrar joystick"]
+    LCD --> PUL["Pulsar el botón<br/>con el joystick suelto"]
+    PUL --> CAP["128 lecturas por eje<br/>radio APAGADA"]
+    CAP --> OKQ{"¿Centro entre 1536 y 2560<br/>y variación ≤ 100?"}
+    OKQ -- no --> REC["LCD: Recalibrar<br/>soltar y esperar 1 s"] --> LCD
+    OKQ -- sí --> SOL["LCD: Soltar boton"]
+    SOL --> NVS["Reservar bloque de<br/>secuencia en NVS"]
+    NVS --> RAD["Encender radio<br/>enviar a 50 Hz"]
+    RAD --> EST["LCD: Esperando robot,<br/>Desarmado o Armado"]
+```
 
 1. Al encender, el LCD muestra **"Control PAIR n"** y **"Centrar joystick"**.
 2. Con el joystick suelto en el centro, se **pulsa** el botón del joystick. El control toma 128 lecturas de cada eje.
@@ -210,11 +327,44 @@ Usa **la misma lógica de radio, secuencia y confirmación** que `control_tx`; s
 
 ### 5.1 Arranque
 
+```mermaid
+flowchart TD
+    ON(["Encender CYD"]) --> HAY{"¿Calibración táctil<br/>guardada en NVS?"}
+    HAY -- sí --> VENT["Mantener toca para recalibrar<br/>1,5 s"]
+    VENT -- "tocó" --> CAL
+    VENT -- "no tocó" --> TOCA
+    HAY -- no --> CAL["Tocar las 4 marcas<br/>y guardar en NVS"]
+    CAL --> TOCA["Toca para iniciar<br/>tocar y soltar"]
+    TOCA --> RAD["Reservar secuencia en NVS<br/>encender radio"]
+    RAD --> UI["Pantalla de juego"]
+```
+
 1. Si ya hay calibración táctil guardada, muestra **"Mantener toca para recalibrar"** durante 1,5 s. Tocar la pantalla en ese momento obliga a recalibrar.
 2. Sin calibración (o si se pidió), hay que tocar las 4 marcas de las esquinas. La calibración se guarda en NVS (`cyd_ui`), separada del contador anti-replay.
 3. **"Toca para iniciar"**: un toque y soltar enciende la radio. Ese toque no cuenta para el armado.
 
 ### 5.2 Pantalla de juego
+
+```mermaid
+flowchart TB
+    subgraph PANTALLA["Pantalla CYD 320 x 240 (horizontal)"]
+        direction TB
+        HDR["Encabezado: Control PAIR n"]
+        subgraph CUERPO[" "]
+            direction LR
+            JOY["IZQUIERDA<br/>Joystick virtual<br/>arrastrar el dedo"]
+            subgraph DER[" "]
+                direction TB
+                EST["DERECHA ARRIBA<br/>Panel de estado"]
+                BTN["DERECHA ABAJO<br/>Botón ARMAR / FRENO"]
+            end
+        end
+        HDR ~~~ CUERPO
+    end
+    TOQ{"¿Hay dedo<br/>en la pantalla?"} -- no --> NEU["Ejes = 0, botón suelto"]
+    TOQ -- "en el joystick" --> JOY
+    TOQ -- "en el botón" --> BTN
+```
 
 - **Izquierda: joystick virtual.** Se arrastra el dedo dentro del círculo; arriba es avanzar. El desplazamiento se limita al radio del círculo y se escala a ±1000.
 - **Derecha arriba: panel de estado** con el mismo texto y color que el LCD del otro control.
@@ -229,6 +379,18 @@ El LED RGB integrado se pone **verde mientras se envía una acción** (joystick 
 ---
 
 ## 6. Alimentación del robot (según el README)
+
+```mermaid
+flowchart LR
+    BAT["Batería 2S 18650<br/>7,4 V · 8,4 V cargada<br/>con BMS"] --> FUS["Fusible o PTC"]
+    FUS --> SW["Interruptor"]
+    SW --> VM["L298N · VM"]
+    SW --> BUCK["Buck 5 V"]
+    CAP["Capacitor<br/>470–1000 µF"] --- VM
+    VM --> MOT["Motores"]
+    BUCK --> VIN["ESP32 · VIN"]
+    GND["GND común:<br/>batería, driver, ESP32, LED"]
+```
 
 - Batería **2S 18650** (7,4 V nominal, 8,4 V cargada) con BMS de balance.
 - Los motores se alimentan desde el L298N; el ESP32 desde un **convertidor buck de 5 V** dedicado. No usar la salida de 5 V del L298N con 2S.
