@@ -12,23 +12,26 @@ El equipo tiene **3 pares** control/robot. Cada par es independiente: el control
 
 ```mermaid
 flowchart LR
-    subgraph CTRL["Control (ESP32)"]
-        IN["Joystick o táctil<br/>Botón ARMAR/FRENO"]
-        UI["LCD o pantalla<br/>LED RGB de estado"]
+    subgraph grpControl["Control ESP32"]
+        nEntrada["Joystick o táctil<br/>Botón ARMAR/FRENO"]
+        nPantalla["LCD o pantalla<br/>LED RGB de estado"]
     end
-    subgraph ROB["Robot (ESP32)"]
-        VAL["Valida el paquete"]
-        ARM["Gesto de armado<br/>Failsafe 300 ms"]
-        RAMP["Mezcla y rampa<br/>de motores"]
-        LED["LED RGB + LED GPIO2"]
+    subgraph grpRobot["Robot ESP32"]
+        nValida["Valida el paquete"]
+        nArmado["Gesto de armado<br/>Failsafe 300 ms"]
+        nRampa["Mezcla y rampa<br/>de motores"]
+        nLeds["LED RGB y LED GPIO2"]
     end
-    DRV["Driver L298N"]
-    MOT["2 motorreductores<br/>TT amarillos"]
+    nDriver["Driver L298N"]
+    nMotores["2 motorreductores<br/>TT amarillos"]
 
-    IN -- "RemoteMsg · 50 Hz<br/>ESP-NOW cifrado" --> VAL
-    VAL --> ARM --> RAMP --> DRV --> MOT
-    ARM --> LED
-    ARM -- "StatusMsg · cada 100 ms" --> UI
+    nEntrada -->|"RemoteMsg 50 Hz, ESP-NOW cifrado"| nValida
+    nValida --> nArmado
+    nArmado --> nRampa
+    nRampa --> nDriver
+    nDriver --> nMotores
+    nArmado --> nLeds
+    nArmado -->|"StatusMsg cada 100 ms"| nPantalla
 ```
 
 ```mermaid
@@ -205,38 +208,38 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph ESP["ESP32 del robot"]
-        G25["GPIO25"]
-        G26["GPIO26"]
-        G32["GPIO32 PWM"]
-        G27["GPIO27"]
-        G14["GPIO14"]
-        G33["GPIO33 PWM"]
-        G17["GPIO17"]
-        G16["GPIO16"]
-        G4["GPIO4"]
-        G2["GPIO2"]
+    subgraph grpEsp["ESP32 del robot"]
+        g25["GPIO25"]
+        g26["GPIO26"]
+        g32["GPIO32 PWM"]
+        g27["GPIO27"]
+        g14["GPIO14"]
+        g33["GPIO33 PWM"]
+        g17["GPIO17"]
+        g16["GPIO16"]
+        g4["GPIO4"]
+        g2["GPIO2"]
     end
-    subgraph DRV["L298N (sin jumpers ENA/ENB)"]
-        IN1["IN1"]
-        IN2["IN2"]
-        ENA["ENA"]
-        IN3["IN3"]
-        IN4["IN4"]
-        ENB["ENB"]
+    subgraph grpDriver["L298N sin jumpers ENA y ENB"]
+        dIn1["IN1"]
+        dIn2["IN2"]
+        dEna["ENA"]
+        dIn3["IN3"]
+        dIn4["IN4"]
+        dEnb["ENB"]
     end
-    G25 --> IN1
-    G26 --> IN2
-    G32 --> ENA
-    G27 --> IN3
-    G14 --> IN4
-    G33 --> ENB
-    ENA --> MI["Motor izquierdo"]
-    ENB --> MD["Motor derecho"]
-    G17 --> LR["LED RGB: R"]
-    G16 --> LG["LED RGB: G"]
-    G4 --> LB["LED RGB: B"]
-    G2 --> LI["LED integrado"]
+    g25 --> dIn1
+    g26 --> dIn2
+    g32 --> dEna
+    g27 --> dIn3
+    g14 --> dIn4
+    g33 --> dEnb
+    dEna --> mIzq["Motor izquierdo"]
+    dEnb --> mDer["Motor derecho"]
+    g17 --> ledRojo["LED RGB rojo"]
+    g16 --> ledVerde["LED RGB verde"]
+    g4 --> ledAzul["LED RGB azul"]
+    g2 --> ledPlaca["LED integrado"]
 ```
 
 | Función | GPIO |
