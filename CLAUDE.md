@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Proyecto
 
-Firmware Arduino para ESP32 que controla 3 pares independientes control/robot de fútbol mediante ESP-NOW cifrado (PMK/LMK). La documentación del repositorio (README, `RESUMEN_*.txt`, `TODO_CHECKLIST_OPERACIONAL.txt`) está en español; mantener ese idioma al documentar. Pruebas en hardware realizadas hasta ahora: solo el par 3 (CYD + ESP32 sin motores); el resto del firmware sigue sin validación física. No afirmar más validación de la que se observó.
+Firmware Arduino para ESP32 que controla 3 pares independientes control/robot de fútbol mediante ESP-NOW cifrado (PMK/LMK). La documentación del repositorio (README, `RESUMEN_*.txt`, `TODO_CHECKLIST_OPERACIONAL.txt`) está en español; mantener ese idioma al documentar. Pruebas en hardware realizadas hasta ahora: el par 3 en banco (CYD + ESP32 sin motores) y una prueba improvisada del par 1 informada por el equipo (fuente de laptop, L298N y motorreductores, sin mediciones registradas); el resto sigue sin validación física. No afirmar más validación de la que se observó.
 
 ## Comandos
 
@@ -31,6 +31,7 @@ Sin `team_config.h`, los sketches compilan con `team_config.example.h` y emiten 
 - Modelo de concurrencia: los callbacks ESP-NOW solo validan y copian datos bajo secciones críticas; PWM, LCD/TFT, LEDs, envío de estado y `Serial` se hacen en `loop()`. Una petición de frenado (`brakePending`) se conserva hasta que `loop()` la atienda. Respetar esta separación al modificar.
 - `soccer_protocol.h` — formato de cable (protocolo v2): `RemoteMsg` 18 bytes y `StatusMsg` 14 bytes empaquetados con `static_assert` de tamaño, CRC16-CCITT. Cambiar el formato exige subir la versión y actualizar control y robot a la vez.
 - `control_tx/esp_now_compat.h` (y su copia en `control_cyd/`) — selecciona la firma del callback de envío según `ESP_IDF_VERSION` (cambió en IDF 5.5). Debe estar en un header para que los prototipos generados por Arduino la vean.
+- Reglamento de la competencia (Robot Soccer Amateur): resumido en la sección "Reglamento Robot Soccer Amateur" del README. Exige motorreductor amarillo, solo Arduino/ESP32, robot de 10 x 10 cm como máximo sin pateo, zona de color superior de 3,5 x 3,5 cm y no encajonar más del 30 % del balón. Las notas "obligatorio por reglamento" anteriores venían de otra competencia. Informes para el equipo en `docs/` (`INFORME_FUNCIONAMIENTO.md`, `REVISION_REGLAMENTO.md`): mantenerlos al día si cambia el comportamiento o el reglamento.
 - `get_mac/get_mac.ino` — utilidad para leer la MAC de cada ESP32.
 - `tools/cyd_probe/` — sondeo de hardware de la CYD (MAC, escaneo I2C, lectura cruda de CST820 y de dos cableados del XPT2046). No es firmware del robot. Los structs usados como parámetros de función en un `.ino` fallan por el auto-prototipo de Arduino: usar tipos simples.
 

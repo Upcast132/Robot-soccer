@@ -15,6 +15,16 @@ DOCUMENTACIÓN Y CONFIGURACIÓN
 [ ] Guardar copia privada de la configuración; no imprimir claves en reportes.
 [ ] Conservar NVS next_seq. No borrarla para resolver una reconexión.
 
+REGLAMENTO ROBOT SOCCER AMATEUR (ver README, sección Reglamento)
+[x] Motorreductores TT amarillos (art. 1.2 y 2.4).
+[x] Chasis de 10 x 10 cm como máximo y frente en U fijo, sin pateo (según el equipo).
+[ ] Medir cada robot montado: 10 x 10 cm o menos; no usar la tolerancia de 12 cm.
+[ ] Zona de color de 3,5 x 3,5 cm en la tapa superior, despejada y bien fija.
+[ ] Consultar con la organización el color de la zona de cada equipo.
+[ ] Comprobar con el balón oficial que la U no encierra más del 30 %.
+[ ] Medir autonomía para 2 x 5 min + alargue de 3 min + penales; baterías
+    de cambio cargadas para el descanso de 2 min.
+
 HARDWARE, ANTES DE ENERGIZAR
 [ ] Jumpers ENA/ENB retirados de cada L298N.
 [ ] Polaridad de baterías y capacitores correcta, GND común.
@@ -27,6 +37,9 @@ HARDWARE, ANTES DE ENERGIZAR
 [ ] Empezar pruebas con ruedas levantadas y alimentación controlada.
 
 PRUEBAS POR PAR — REPETIR PARA 1, 2 Y 3
+[~] Par 1: prueba improvisada en el colegio informada por el equipo (fuente de
+    laptop, ESP32 + L298N + motorreductores, control_tx con LCD y joystick).
+    Falta repetirla con batería y en chasis, siguiendo esta lista.
 [ ] Control con robot apagado: tras calibrar indica Esperando robot (azul).
     Nunca Armado ni confirmación basada solamente en ACK de radio.
 [ ] LCD Centrar joystick: soltar y pulsar; sin órdenes durante la captura.

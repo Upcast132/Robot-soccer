@@ -10,7 +10,14 @@ Sistema de control remoto seguro para robots de fútbol basado en ESP32 y protoc
 
 ## Estado de esta revisión
 
-Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Control y robot compilan con Arduino CLI 1.5.2-rc.1, Arduino-ESP32 3.3.11 y FQBN `esp32:esp32:esp32`, usando las cabeceras locales y `PAIR_ID=1`. **No se probó ni cargó firmware en hardware**.
+Se implementa el protocolo de aplicación **v2**. **Actualizar control y robot juntos**: las versiones incompatibles se rechazan. Control y robot compilan con Arduino CLI 1.5.2-rc.1, Arduino-ESP32 3.3.11 y FQBN `esp32:esp32:esp32`, usando las cabeceras locales y `PAIR_ID=1`. Pruebas en hardware: el **par 3** en banco (CYD + ESP32 sin motores, ver [Control alternativo en CYD](#control-alternativo-en-cyd-esp32-2432s024r)) y una **prueba improvisada del par 1** en el colegio, informada por el equipo (ESP32 + L298N + motorreductores amarillos alimentados con una fuente de laptop, control `control_tx` con LCD 16x2 y joystick), sin mediciones registradas. Falta la prueba con batería definitiva, en chasis y con los tres pares.
+
+Requisitos del reglamento de la competencia: ver [Reglamento Robot Soccer Amateur](#reglamento-robot-soccer-amateur).
+
+Informes detallados:
+
+- [docs/INFORME_FUNCIONAMIENTO.md](docs/INFORME_FUNCIONAMIENTO.md): cómo funcionan el robot, los controles, la radio y las protecciones.
+- [docs/REVISION_REGLAMENTO.md](docs/REVISION_REGLAMENTO.md): lista de revisión antes de la competencia, artículo por artículo del reglamento.
 
 Se revisaron las firmas oficiales del callback de envío en [ESP-IDF 5.4](https://github.com/espressif/esp-idf/blob/v5.4/components/esp_wifi/include/esp_now.h) y [ESP-IDF 5.5](https://github.com/espressif/esp-idf/blob/v5.5/components/esp_wifi/include/esp_now.h). `control_tx/esp_now_compat.h` selecciona `const uint8_t *` antes de 5.5 y `const esp_now_send_info_t *` desde 5.5 mediante `ESP_IDF_VERSION`. La compilación comprobada con 3.3.11 no valida todas las versiones del núcleo.
 
@@ -178,7 +185,7 @@ Advertencias criticas del robot:
 | :--- | :--- | :--- | :--- |
 | ESP32 DevKit | 1 | 3 | WROOM-32 o similar |
 | Driver L298N | 1 | 3 | O TB6612FNG como mejora futura |
-| Motor DC con reductora | 2 | 6 | 3-6V, eje D. Un motor por canal del L298N |
+| Motorreductor TT **amarillo** | 2 | 6 | 3-6V, eje D. Un motor por canal del L298N. Exigido por el reglamento (art. 1.2 y 2.4) |
 | Celda 18650 3.7V nominal / 4.2V cargada | 2 | 6 | Celdas iguales en serie: 2S = 7.4V nominal, 8.4V maximo |
 | BMS 2S 7.4V con balance | 1 | 3 | Proteccion sobre-descarga y balance de celdas |
 | Convertidor buck 5V | 1 | 3 | Alimentacion dedicada para VIN del ESP32 |
@@ -187,11 +194,12 @@ Advertencias criticas del robot:
 | Fusible o PTC | 1 | 3 | En positivo de bateria. Valor segun stall current |
 | Conector JST-XH | 1 | 3 | Para balance de bateria |
 | Conector JST-SM/T | 2 | 6 | Alimentacion principal y carga |
-| Switch SPDT | 1 | 3 | Obligatorio por reglamento de competencia |
-| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado (azul/amarillo/verde/rojo). Obligatorio por reglamento |
+| Switch SPDT | 1 | 3 | Corte físico de alimentación. Lo exigía la competencia anterior; el reglamento amateur actual no lo pide, se mantiene por seguridad |
+| **LED RGB (catodo comun)** | 1 | 3 | Indicador de estado (azul/amarillo/verde/rojo). Lo exigía la competencia anterior; el reglamento actual no lo pide |
 | **Resistencia 220-330 ohm** | 3 | 9 | Una por cada pata de color del LED RGB |
 | Rueda loca | 1 | 3 | Metalica o plastica con rodamiento |
-| Chasis | 1 | 3 | Acrilico 2WD o impresion 3D PLA/PETG |
+| Chasis | 1 | 3 | Acrilico 2WD o impresion 3D PLA/PETG. Máximo 10 x 10 cm (ver reglamento) |
+| Placa de color superior | 1 | 3 | Superficie plana de 3,5 x 3,5 cm (mínimo), color sólido visible desde arriba (art. 2.3) |
 
 ### Por cada Control (Cantidad total para 3 controles)
 
@@ -406,6 +414,31 @@ Encender los 3 controles y 3 robots, calibrar y armar cada par en el mismo espac
 | Intervalo de refresco del LCD | 300 ms | control_tx.ino LCD_UPDATE_INTERVAL_MS |
 | Direcciones I2C del LCD probadas | 0x27, luego 0x3F | control_tx.ino initializeLcd() |
 
+## Reglamento Robot Soccer Amateur
+
+Resumen de los requisitos técnicos del reglamento oficial (Feria de Robótica, Grupo Editorial Amazonas, categoría 3. Robot Soccer Amateur) y su estado en este proyecto. Las reglas de juego (zonas, arquero, tiempos, penales) las cumple quien pilota; el firmware no las controla.
+
+| Artículo | Requisito | Estado |
+| :--- | :--- | :--- |
+| 1.1 / 4.1 | Equipos de 3 robots controlados de forma inalámbrica | Cumple: 3 pares control/robot independientes por ESP-NOW cifrado |
+| 1.2 / 2.4 | Motorreductor con caja amarilla (el art. 1.2 también admite la azul) | Cumple: el equipo usa motorreductores TT amarillos |
+| 2.4 | Solo Arduino o ESP32 como microcontrolador | Cumple: ESP32 en robots y controles (la CYD también es ESP32) |
+| 2.1 | Máximo 10 x 10 cm (o 10 cm de diámetro), sin mecanismo de pateo | Cumple según el equipo; el frente en U es pasivo, no patea. Medir cada robot montado antes del evento |
+| 2.2 | Tolerancia hasta 12 x 12 cm con penalización de 1 gol; más de 12 cm descalifica | No usar la tolerancia |
+| 2.3 | Zona de color visible de 3,5 x 3,5 cm en la parte superior | Pendiente de montar (ver abajo) |
+| 2.3 | No retener, succionar ni encajonar el balón en más del 30 % de la estructura | Cumple según el equipo (frente en U); comprobar con el balón oficial |
+| 4.4 / 4.7 | Partido de 2 x 5 min, descanso de 2 min, alargue de 3 min y penales | Batería: medir autonomía; se puede cambiar por otra cargada en el descanso |
+| 4.10 | Sin cambios de robot durante el partido; con un solo robot se pierde por 2 goles | Llevar repuestos y probar los tres pares antes |
+
+**Zona de color (art. 2.3).** Es una superficie plana de un solo color, de al menos 3,5 x 3,5 cm, en la cara superior del robot, para que los jueces identifiquen cada robot o equipo desde arriba. Al ensamblar:
+
+- Reservar en la tapa superior un cuadrado libre de 3,5 x 3,5 cm o más: sin cables, tornillos, LED, ESP32 ni componentes encima.
+- Usar cartulina, vinilo adhesivo, acrílico de color o pintura mate, bien fija para que no se despegue con los choques. Evitar superficies brillantes que reflejen la luz.
+- El reglamento no dice qué color usar: consultarlo con la organización. Lo habitual es el mismo color en los 3 robots de un equipo y distinto del rival.
+- Si la tapa no tiene espacio, montar una placa elevada sobre separadores, sin pasarse de los 10 x 10 cm de planta.
+
+**Frente en U (art. 2.1 y 2.3).** La U sirve para conducir el balón y no cuenta como mecanismo de pateo mientras sea fija. Para no superar el 30 %, la profundidad de la U debe dejar fuera la mayor parte del balón: con la pelota apoyada al fondo de la U, como máximo un 30 % de su diámetro debería quedar dentro. Confirmar con el balón oficial y, si hay duda, con los jueces antes del partido.
+
 ## Opciones de Chasis
 
 ### Opcion A: Kit acrilico 2WD estandar
@@ -429,7 +462,8 @@ Encender los 3 controles y 3 robots, calibrar y armar cada par en el mismo espac
 - [ ] Consumo medido bajo carga durante 30 minutos de uso intenso.
 - [ ] 2 juegos de baterias cargadas y balanceadas por robot.
 - [ ] Repuestos disponibles: ESP32 extra, driver, cables, soldador.
-- [ ] Switches y LEDs funcionales y visibles segun reglamento.
+- [ ] Switches y LEDs funcionales y visibles.
+- [ ] Cada robot mide como máximo 10 x 10 cm, tiene su zona de color de 3,5 x 3,5 cm despejada y no encajona más del 30 % del balón.
 - [ ] Prueba de interferencia cruzada completada con 3 pares activos.
 - [ ] Jumpers ENA/ENB retirados en todos los drivers L298N.
 - [ ] Capacitores instalados en posiciones correctas.
